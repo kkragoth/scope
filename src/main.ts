@@ -790,7 +790,7 @@ const lensMat = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: scopeTarget.texture },
     uDirtMap: { value: dirtTexture },
-    uAberration: { value: 0.008 },
+    uAberration: { value: 0.016 },
     uVignetteSize: { value: 0.485 },
     uShadowHardness: { value: 0.06 },
     uParallaxSens: { value: 1.06 },
@@ -866,13 +866,13 @@ const lensMat = new THREE.ShaderMaterial({
       return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
     // Radial barrel/fisheye warp around the optical axis. k < 0 barrels (the
-    // classic scope "bulge"): center magnified, rim compressed and bowed. A
-    // second higher-order term (r^4) compounds the curvature like two stacked
-    // lens elements — the "double-layered" bend real scopes have. One shared
+    // classic scope "bulge"): center magnified, rim compressed and bowed. Two
+    // higher-order terms (r^4, r^6) compound the curvature like stacked lens
+    // elements — the rim bows hardest while the center stays flat. One shared
     // function so the image AND the etched reticle curve together.
     vec2 barrelWarp(vec2 p, float k) {
       float r2 = dot(p, p);
-      return p * (1.0 + k * r2 + k * 0.5 * r2 * r2);
+      return p * (1.0 + k * r2 + k * 0.6 * r2 * r2 + k * 0.3 * r2 * r2 * r2);
     }
     // Chromatic sample at one bent coord. Transverse CA: R/B bend linearly
     // with radius (real lateral color scales ~r, not r^2) — the fringe is
@@ -980,16 +980,15 @@ const lensMat = new THREE.ShaderMaterial({
       // (inputs already zoom-amplified in JS — no uZoomK re-multiply here.)
       float blurMix = clamp(abs(uEyeRelief - 1.0) * 0.9 + swayDist * 0.6, 0.0, 1.0);
 
-      // Physical lateral CA: zero at center, grows linearly to the rim. A real
-      // ocular's transverse color makes a visible magenta/green fringe at the
-      // edge of the sight picture; keep it honest (~2-3px at 768) rather than
-      // a fisheye rainbow. Sway modulates it slightly (the eye sits off the
-      // optical axis, which bends color more).
-      float caMask = smoothstep(0.10, 0.46, distFromCenter);
-      float dynamicAberration = uAberration * (0.75 + swayDist * 0.5) * caMask;
+      // Physical lateral CA: zero at center, grows to the rim. A real ocular's
+      // transverse color makes a visible magenta/green fringe at the edge of
+      // the sight picture — strong at the rim, absent at center. Sway modulates
+      // it (the eye sits off the optical axis, bending color more).
+      float caMask = smoothstep(0.06, 0.42, distFromCenter);
+      float dynamicAberration = uAberration * (1.2 + swayDist * 0.8) * caMask;
       // Longitudinal color rides on defocus: out-of-focus edges split blue/red
       // around the green focal plane (axial CA). Grows with relief error + zoom.
-      float axialAberration = uAberration * (0.35 + blurMix * 1.6) * caMask;
+      float axialAberration = uAberration * (0.6 + blurMix * 2.2) * caMask;
 
       // Rim-weighted barrel + fisheye distortion: the ocular is a curved glass
       // element, so the whole field bows around the optical axis — straight
@@ -1002,7 +1001,7 @@ const lensMat = new THREE.ShaderMaterial({
       float swayBoost = min(swayDist * 2.0, 1.0);
       float zoomBoost = clamp((uZoomK - 1.0) * 0.45, 0.0, 1.0);
       // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
-      float barrelK = mix(-0.15, -0.09, uAdsWeight) * (1.0 + 0.8 * swayBoost + 1.2 * zoomBoost);
+      float barrelK = mix(-0.26, -0.16, uAdsWeight) * (1.0 + 0.8 * swayBoost + 1.2 * zoomBoost);
       vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
