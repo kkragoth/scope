@@ -940,11 +940,9 @@ const lensMat = new THREE.ShaderMaterial({
 
       // ---- SIGHT SLIDE + WHISPER PARALLAX ----
       // The world image is now ROTATED WITH THE GUN (the render camera is on
-      // the barrel), so the internal lateral slide is only the *parallax*
-      // whisper — a real eye off-axis shifts the etched reticle against the
-      // distant world by a hair, not half a lens. Kept small on purpose: the
-      // "sway" the player should feel is the WHOLE gun rotating, expressed as
-      // tunnel tilt + edge blackout below, not the picture swimming.
+      // the barrel), so any internal lateral slide is only the *parallax*
+      // whisper — the sway is FELT through the whole sight (picture + reticle
+      // slide together off-axis, so the crosshair never sits glued to centre).
       vec2 rawSight = -uEyeOffset * 0.6;
       float maxSight = uVignetteSize * 0.8;
       vec2 sightC = length(rawSight) > maxSight ? normalize(rawSight) * maxSight : rawSight;
@@ -1237,26 +1235,11 @@ const lensMat = new THREE.ShaderMaterial({
 
       float objectiveMask = smoothstep(nearR - shadowK, nearR, distImg);
 
-      // Directional eye-box shadow: blackout creeps in from the side the eye
-      // drifts toward (not a uniform radial close). The blackout edge is the
-      // arc of the eye's entrance pupil sliding against the field stop — a
-      // lune/crescent (elliptical under tube tilt), NOT a straight cutoff.
-      {
-        float eyeMag = length(uEyeOffset);
-        vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
-        // eye pupil is a disc that travels with the eye; the picture shows
-        // only where it overlaps the objective field stop. Off-axis the two
-        // discs part into a crescent.
-        float slide = min(eyeMag * 2.0, 0.8);
-        vec2 pupilC = nearC - eyeDir * nearR * slide;
-        // Eye pupil is ~the same size as the field stop: sliding it yields ONE
-        // crescent (a lens bounded by two equal arcs) that reads as a single
-        // kidney-bean, not two separate circles. Slide is capped so the arc
-        // never flattens into a straight chord at saturated sway.
-        float pupilR = nearR * 0.98;
-        float pupilMask = smoothstep(pupilR - shadowK, pupilR, ellR(uv, pupilC, tiltDir, tiltCos));
-        objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.008, 0.10, eyeMag));
-      }
+      // NOTE: the eye-box shadow (below, applied just before the tunnel mix)
+      // is NOT part of objectiveMask. The mask here is only the physical tube
+      // beyond the field stop; the shadow lives *on top of the picture* as a
+      // soft dimming crescent, so it never renders baffles/glass sheen inside
+      // the shadow and never fades with a motion gate.
 
       // Depth along the bore: solve f(t) = ellR(uv, lerp(nearC,farC,t)) -
       // lerp(nearR,farR,t) = 0. f is ~linear in t for the small center slide,
@@ -1349,6 +1332,32 @@ const lensMat = new THREE.ShaderMaterial({
         // sky fresnel veil: a whisper, mostly neutral, rim-only
         float veil = pow(smoothstep(0.32, 0.5, distFromCenter), 2.0) * 0.045 * (0.3 + 0.7 * uSunIntensity) * fresBoost;
         sceneColor = mix(sceneColor, vec3(0.42, 0.46, 0.50), veil * (1.0 - objectiveMask));
+      }
+
+      // ---- EYE-BOX SHADOW: one soft crescent, pure eye geometry ----
+      // The picture the eye sees = field stop ∩ eye pupil. The pupil is a disc
+      // the same size as the field stop that travels OPPOSITE the eye drift;
+      // sliding it yields exactly ONE crescent that closes to nothing when the
+      // eye is centred (concentric equal discs → no overlap, no shadow). No
+      // motion gate anywhere — the darkness is a smooth function of how deep
+      // the pixel lies past the pupil arc, so a sway draws a gradiented crescent
+      // and stopping lets it shrink away instead of ghosting out at one opacity.
+      // Deliberately NOT masked to "inside the field stop": the dim is deepest
+      // exactly at the picture edge (the bite is largest there), so it must run
+      // all the way out to meet the black tube — an inField clip left a bright
+      // "space between two masks". Pixels past the stop are tube anyway (mixed
+      // below), so dimming them here is harmless.
+      {
+        float eyeMag = length(uEyeOffset);
+        vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
+        float slide = min(eyeMag * 1.7, 0.85);
+        vec2 pupilC = nearC - eyeDir * nearR * slide;
+        float bite = ellR(uv, pupilC, tiltDir, tiltCos) - nearR;
+        float penumbra = 0.22 * nearR;
+        float shade = smoothstep(0.0, penumbra, max(bite, 0.0));
+        // only matters once the rifle is shouldered — hip keeps its dim peephole.
+        float seatGain = smoothstep(0.25, 0.8, eyeBox);
+        sceneColor *= 1.0 - shade * seatGain;
       }
 
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
@@ -1500,6 +1509,14 @@ interface ScopeConfig {
 
 const config: ScopeConfig = { fov: 3.0 };
 let isAiming = false;
+// Eye-box hold mode (G): how the black crescent behaves once the sway stops.
+//   1 CLEAN  — eye re-seats fully; shadow closes to nothing.
+//   2 SOFT   — a small gradiented crescent always remains (never dead-centre).
+//   3 STICKY — the misalignment stays where the sway left it until you
+//              un-shoulder (hip) or re-shoulder; no automatic re-seat in ADS.
+let eyeBoxMode = 1;
+let prevAiming = false;
+const EYEBOX_NAMES = ['', 'CLEAN', 'SOFT', 'STICKY'] as const;
 
 const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
@@ -1652,6 +1669,11 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     rightEye = !rightEye;
     (document.getElementById('eyestate') as HTMLParagraphElement).textContent =
       `Sight: ${rightEye ? 'RIGHT-EYE' : 'CENTERED'} — K to toggle`;
+  }
+  if (k === 'g') {
+    eyeBoxMode = (eyeBoxMode % 3) + 1;
+    (document.getElementById('boxstate') as HTMLParagraphElement).textContent =
+      `Eye-box hold: ${EYEBOX_NAMES[eyeBoxMode]} — G cycles`;
   }
   if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
@@ -2160,15 +2182,41 @@ function animate(): void {
       // Operator re-seat, asymmetric: the eye LOSES the box fast (attack)
       // and re-finds it slowly (release). Fast L-R flicks punch shadow in
       // on every reversal instead of averaging out to nothing.
+      // Eye-box hold mode (G) only changes the *target* and the release rate:
+      //   CLEAN  — re-seat to true geometry as below (shadow closes at rest).
+      //   SOFT   — a standing wander keeps the eye just off dead-centre, so a
+      //            soft gradiented crescent never fully disappears.
+      //   STICKY — in ADS the eye does NOT re-seat (release ≈ 0); the crescent
+      //            stays where the sway left it. Un-shouldering (hip) resets it
+      //            fast, re-shouldering starts a fresh weld, and holding breath
+      //            (SHIFT) lets you deliberately re-seat back into the box.
       {
-        const tgtMag = Math.hypot(eyeU, eyeV);
+        const aimRising = isAiming && !prevAiming;
+        prevAiming = isAiming;
+        let tgtX = eyeU;
+        let tgtY = eyeV;
+        if (eyeBoxMode === 2) {
+          const wob =
+            0.10 * (0.7 + 0.3 * Math.sin(time * 0.9 + seedA)) *
+            (isAiming ? 1.0 : 0.0);
+          tgtX += Math.sin(time * 0.53 + seedB) * wob;
+          tgtY += Math.cos(time * 0.41 + seedC) * wob * 0.8;
+        }
+        if (aimRising && eyeBoxMode === 3) {
+          _eyeSm.set(0, 0); // fresh shoulder weld clears the stuck shadow
+        }
+        const tgtMag = Math.hypot(tgtX, tgtY);
         const curMag = Math.hypot(_eyeSm.x, _eyeSm.y);
-        const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : 6) * delta);
+        let releaseRate = 6.0;
+        if (eyeBoxMode === 3) {
+          releaseRate = isAiming ? (breathHeld ? 3.0 : 0.35) : 8.0;
+        }
+        const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
         const relDev = Math.abs(relief - 1);
         const relCur = Math.abs(_reliefSm - 1);
         const relRate = Math.min(1, (relDev > relCur ? 12 : 5) * delta);
-        _eyeSm.x += (eyeU - _eyeSm.x) * eyeRate;
-        _eyeSm.y += (eyeV - _eyeSm.y) * eyeRate;
+        _eyeSm.x += (tgtX - _eyeSm.x) * eyeRate;
+        _eyeSm.y += (tgtY - _eyeSm.y) * eyeRate;
         _reliefSm += (relief - _reliefSm) * relRate;
       }
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
