@@ -870,6 +870,15 @@ weaponGroup.position.copy(hipPosition);
 let currentAdsWeight = 0.0;
 let mouseVelocityX = 0;
 let mouseVelocityY = 0;
+// LAYER 1 — head targets: the head has mass, it eases toward look intent
+// (~30/s) instead of teleporting. Weapon trails the *eased* head, so error
+// between layers is organic, never rigid-vs-loose.
+let yawTarget = 0;
+let pitchTarget = 0;
+// LAYER 2 — movement rotation kicks: angular acceleration tilts the gun
+// (roll + a whisper of pitch). Steady motion doesn't tilt; jerks do.
+let kickRoll = 0;
+let kickPitch = 0;
 
 type MoveKey = 'w' | 'a' | 's' | 'd';
 const keys: Record<MoveKey, boolean> = { w: false, a: false, s: false, d: false };
@@ -894,12 +903,14 @@ document.addEventListener('mousemove', (event: MouseEvent) => {
   const fovRatio = isAiming ? config.fov / 70.0 : 1.0;
   const currentSens = isAiming ? baseSens * fovRatio * 1.5 : baseSens;
 
-  playerGroup.rotation.y -= movementX * currentSens;
-  pitchObject.rotation.x -= movementY * currentSens;
-  pitchObject.rotation.x = Math.max(
+  yawTarget -= movementX * currentSens;
+  pitchTarget = THREE.MathUtils.clamp(
+    pitchTarget - movementY * currentSens,
     -Math.PI / 2,
-    Math.min(Math.PI / 2, pitchObject.rotation.x),
+    Math.PI / 2,
   );
+  moveImpX += movementX;
+  moveImpY += movementY;
 
   mouseVelocityX += movementX * 0.001 * fovRatio;
   mouseVelocityY += movementY * 0.001 * fovRatio;
@@ -1004,6 +1015,18 @@ let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
 let holdBlend = 0.0;
+// WHOLE-WEAPON PHYSICS: position/rotation + velocities. Anchors switch on
+// intent; the gun flies there with mass (slightly underdamped → a breath of
+// overshoot on the shoulder). ADS weight is DERIVED from gun position.
+const wPos = hipPosition.clone();
+const wVel = new THREE.Vector3();
+const wRot = new THREE.Vector3(0, 0.15, 0.05);
+const wRotVel = new THREE.Vector3();
+const _anchor = new THREE.Vector3();
+const HIP_ADS_DIST = hipPosition.distanceTo(adsPosition);
+// per-frame mouse impulse (px) — drives acceleration kicks, then zeroed.
+let moveImpX = 0;
+let moveImpY = 0;
 // Sun occlusion test (1 = visible, 0 = blocked; smoothed per-frame)
 const sunRay = new THREE.Raycaster();
 sunRay.far = 800;
@@ -1024,7 +1047,7 @@ export const parallaxError = new THREE.Vector2(0, 0);
 
 function animate(): void {
   requestAnimationFrame(animate);
-  const delta = clock.getDelta();
+  const delta = Math.min(clock.getDelta(), 1 / 30);
   const time = clock.getElapsedTime();
 
   if (document.pointerLockElement === document.body) {
@@ -1044,42 +1067,66 @@ function animate(): void {
     camera.fov += (targetMainFov - camera.fov) * 12 * delta;
     camera.updateProjectionMatrix();
 
+    // LAYER 1 — head eases toward look intent (mass, ~30/s, no teleport).
+    playerGroup.rotation.y +=
+      (yawTarget - playerGroup.rotation.y) * Math.min(1, 30 * delta);
+    pitchObject.rotation.x +=
+      (pitchTarget - pitchObject.rotation.x) * Math.min(1, 30 * delta);
+
+    // WHOLE-WEAPON TARGETS: anchor follows intent; sway offsets ride along.
     const targetWeight = isAiming ? 1.0 : 0.0;
-    // Shoulder speed: slow enough to read the tunnel sweep (~300ms), not a pop.
-    currentAdsWeight += (targetWeight - currentAdsWeight) * 11.0 * delta;
-    weaponGroup.position.lerpVectors(hipPosition, adsPosition, currentAdsWeight);
+    _anchor.lerpVectors(hipPosition, adsPosition, targetWeight);
 
-    // EYE-RELIEF BREATHING + WALK BOB: longitudinal micro-motion of the gun
-    // relative to the eye. At ADS this is ±2-3mm (stays inside the eye box);
-    // at hip it is ~4x larger. This is what makes relief a live axis instead
-    // of a static ADS/hip lerp.
-    {
-      const bobScale = THREE.MathUtils.lerp(1.0, 0.25, currentAdsWeight);
-      const moveTarget = keys.w || keys.a || keys.s || keys.d ? 1.0 : 0.0;
-      moveBlend += (moveTarget - moveBlend) * Math.min(1, 6 * delta);
-      if (moveBlend < 0.001) moveBlend = 0;
-      const walkPh = time * 9.0;
-      // All smooth sinusoids — the old abs(cos) vertical bounce had a velocity
-      // cusp every half period that read as a micro-snap at high zoom.
-      weaponGroup.position.x +=
-        (Math.sin(walkPh) * 0.004 * moveBlend + Math.sin(time * 1.7) * 0.0015) * bobScale;
-      weaponGroup.position.y +=
-        (Math.sin(walkPh * 2.0) * 0.0025 * moveBlend + Math.sin(time * 2.3) * 0.0012) * bobScale;
-      // longitudinal: breathing + footstep thump drive relief in/out
-      weaponGroup.position.z +=
-        (Math.sin(time * 1.1) * 0.003 + Math.sin(walkPh) * 0.002 * moveBlend) * bobScale;
-    }
+    const holdRate = breathHeld ? 5.0 : 3.0;
+    holdBlend += ((breathHeld ? 1 : 0) - holdBlend) * Math.min(1, holdRate * delta);
+    if (!breathHeld && holdBlend < 0.001) holdBlend = 0;
+    const breathFactor = 1.0 - holdBlend * 0.93;
 
-    lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
+    const moveTarget = keys.w || keys.a || keys.s || keys.d ? 1.0 : 0.0;
+    moveBlend += (moveTarget - moveBlend) * Math.min(1, 6 * delta);
+    if (moveBlend < 0.001) moveBlend = 0;
+    const walkPh = time * 9.0;
+    // All smooth sinusoids — the old abs(cos) vertical bounce had a velocity
+    // cusp every half period that read as a micro-snap at high zoom.
+    const bobScale = THREE.MathUtils.lerp(1.0, 0.25, currentAdsWeight);
+    const bobX =
+      (Math.sin(walkPh) * 0.004 * moveBlend + Math.sin(time * 1.7) * 0.0015) * bobScale;
+    const bobY =
+      (Math.sin(walkPh * 2.0) * 0.0025 * moveBlend + Math.sin(time * 2.3) * 0.0012) * bobScale;
+    const bobZ =
+      (Math.sin(time * 1.1) * 0.003 + Math.sin(walkPh) * 0.002 * moveBlend) * bobScale;
+    // slow positional drift: gun wanders under the eye (more at hip)
+    const driftScale =
+      THREE.MathUtils.lerp(1.0, 0.3, currentAdsWeight) * breathFactor;
+    const driftX = Math.sin(time * 0.9 + 1.3) * 0.006 * driftScale;
+    const driftY = Math.sin(time * 1.2 + 0.4) * 0.004 * driftScale;
 
-    // RIFLE CATCH-UP: the head turns instantly, the gun trails. ADS spring sits
-    // between loose and locked (~12/s) — visible drag on fast looks, no mud.
-    // Hip stays loose (5/s).
-    const springForce = isAiming ? 12.0 : 5.0;
+    const swayMul = (isAiming ? 0.005 : 0.015) * breathFactor;
+    const breathRX = Math.sin(time * 2.0) * swayMul;
+    const breathRY = Math.cos(time * 1.0) * (swayMul * 0.5);
+
+    // CHEEK WELD: the eye rides the gun. Tracking a turn shouldered keeps
+    // alignment — error is a brief transient on jerks, never a standing
+    // offset while turning. So: fast stiff spring (~22/s) + tight clamp.
+    // Hard flicks kiss the rim; only genuinely violent jerks flash shadow.
+    const springForce = isAiming ? 22.0 : 8.0;
     mouseVelocityX = THREE.MathUtils.lerp(mouseVelocityX, 0, springForce * delta);
     mouseVelocityY = THREE.MathUtils.lerp(mouseVelocityY, 0, springForce * delta);
-    mouseVelocityX = THREE.MathUtils.clamp(mouseVelocityX, -0.25, 0.25);
-    mouseVelocityY = THREE.MathUtils.clamp(mouseVelocityY, -0.25, 0.25);
+    mouseVelocityX = THREE.MathUtils.clamp(mouseVelocityX, -0.09, 0.09);
+    mouseVelocityY = THREE.MathUtils.clamp(mouseVelocityY, -0.09, 0.09);
+
+    // LAYER 2 — acceleration kicks: this frame's mouse impulse tilts the gun
+    // (roll + whisper of pitch). Steady motion holds no tilt; jerks do.
+    // Impulse is consumed here, so kicks can't accumulate.
+    {
+      const kickT = Math.min(1, 10 * delta);
+      kickRoll +=
+        (THREE.MathUtils.clamp(-moveImpX * 0.0004, -0.05, 0.05) - kickRoll) * kickT;
+      kickPitch +=
+        (THREE.MathUtils.clamp(-moveImpY * 0.0002, -0.03, 0.03) - kickPitch) * kickT;
+      moveImpX = 0;
+      moveImpY = 0;
+    }
 
     // HEAD LEAN: auto (strafe + lateral flick) + manual Q/E. Applied to
     // pitchObject so head AND gun move together — the world (inside and
@@ -1101,34 +1148,39 @@ function animate(): void {
       pitchObject.position.y = -Math.abs(manualLean) * 0.02;
     }
 
-    // SWAY LIVES IN THE WEAPON: breath + weight drift rotate and translate the
-    // gun (visible mesh motion + swimming sight picture). The etch stays near
-    // the tube center (parallax gain ~1.1) instead of chasing the eye, so the
-    // cross reads steady while the world moves. SHIFT holds breath: ramps the
-    // whole sway down ~93%, leaving only a whisper of life.
-    const holdRate = breathHeld ? 5.0 : 3.0;
-    holdBlend += ((breathHeld ? 1 : 0) - holdBlend) * Math.min(1, holdRate * delta);
-    if (!breathHeld && holdBlend < 0.001) holdBlend = 0;
-    const breathFactor = 1.0 - holdBlend * 0.93;
-
-    const swayMultiplier = (isAiming ? 0.005 : 0.015) * breathFactor;
-    const breathX = Math.sin(time * 2.0) * swayMultiplier;
-    const breathY = Math.cos(time * 1.0) * (swayMultiplier * 0.5);
-    // slow positional drift: gun wanders under the eye (more at hip)
-    const driftScale =
-      THREE.MathUtils.lerp(1.0, 0.3, currentAdsWeight) * breathFactor;
-    weaponGroup.position.x += Math.sin(time * 0.9 + 1.3) * 0.006 * driftScale;
-    weaponGroup.position.y += Math.sin(time * 1.2 + 0.4) * 0.004 * driftScale;
-
-    // DYNAMIC ALIGNMENT: Gun points slightly left/inward when at hip to converge on screen center
-    const baseRotY = THREE.MathUtils.lerp(0.15, 0.0, currentAdsWeight);
-    const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, currentAdsWeight);
-
-    weaponGroup.rotation.y = baseRotY - mouseVelocityX + breathX;
-    weaponGroup.rotation.x = -mouseVelocityY + breathY;
-    // Lateral mouse rolls the tube hard: fast L-R visibly tilts gun +
-    // reticle (the "/" vs "\" read), not just a sideways smear.
-    weaponGroup.rotation.z = baseRotZ - mouseVelocityX * 0.75;
+    // LAYER 2/3 — integrate. Rotation chases (base + lag + breath + kicks),
+    // position chases (anchor + bob + drift). Slightly underdamped, so the
+    // shoulder lands with mass and a breath of overshoot instead of on rails.
+    // ADS weight is DERIVED from where the gun is — glass follows physics.
+    const baseRotY = THREE.MathUtils.lerp(0.15, 0.0, targetWeight);
+    const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
+    {
+      const tRX = -mouseVelocityY + breathRY + kickPitch;
+      const tRY = baseRotY - mouseVelocityX + breathRX;
+      const tRZ = baseRotZ - mouseVelocityX * 0.75 + kickRoll;
+      const KR = 160;
+      const CR = 20.0;
+      const KP = 110;
+      const CP = 18.9;
+      wRotVel.x += ((tRX - wRot.x) * KR - wRotVel.x * CR) * delta;
+      wRotVel.y += ((tRY - wRot.y) * KR - wRotVel.y * CR) * delta;
+      wRotVel.z += ((tRZ - wRot.z) * KR - wRotVel.z * CR) * delta;
+      wRot.x += wRotVel.x * delta;
+      wRot.y += wRotVel.y * delta;
+      wRot.z += wRotVel.z * delta;
+      weaponGroup.rotation.set(wRot.x, wRot.y, wRot.z);
+      wVel.x += ((_anchor.x + bobX + driftX - wPos.x) * KP - wVel.x * CP) * delta;
+      wVel.y += ((_anchor.y + bobY + driftY - wPos.y) * KP - wVel.y * CP) * delta;
+      wVel.z += ((_anchor.z + bobZ - wPos.z) * KP - wVel.z * CP) * delta;
+      wPos.x += wVel.x * delta;
+      wPos.y += wVel.y * delta;
+      wPos.z += wVel.z * delta;
+      weaponGroup.position.copy(wPos);
+      const dAds = wPos.distanceTo(adsPosition);
+      const aw = THREE.MathUtils.clamp(1 - dAds / HIP_ADS_DIST, 0, 1);
+      currentAdsWeight = aw * aw * (3 - 2 * aw);
+    }
+    lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
 
     // SCOPE IMAGE STAYS LEVEL WHILE THE RETICLE ROLLS: the objective lenses
     // are rotationally symmetric, so rolling the tube around its own optical
@@ -1180,7 +1232,7 @@ function animate(): void {
       const rawY = _eyeLocal.y / tubeR;
       const rawMag = Math.hypot(rawX, rawY);
       const distGain =
-        0.25 + 0.75 * THREE.MathUtils.smoothstep(rawMag, 0.4, 1.8);
+        0.3 + 0.7 * THREE.MathUtils.smoothstep(rawMag, 0.4, 1.8);
       const softX = Math.tanh(rawX * 0.9) * distGain * zoomTighten;
       const softY = Math.tanh(rawY * 0.9) * distGain * zoomTighten;
       const eyeU = THREE.MathUtils.clamp(softX * 0.6, -0.3, 0.3);
