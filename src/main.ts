@@ -329,6 +329,19 @@ const weaponMat = new THREE.MeshStandardMaterial({
   envMapIntensity: 0.8,
 });
 
+// The scope body reads as polished black-anodized aluminum rather than the
+// receiver's parkerized steel — higher metalness + tighter gloss so the
+// ocular bell (the end facing the player) catches a faint sky reflection and
+// reads as a separate, reflective part of the rifle.
+const scopeMat = new THREE.MeshStandardMaterial({
+  color: 0x2b2e33,
+  roughness: 0.3,
+  metalness: 0.92,
+  side: THREE.DoubleSide,
+  roughnessMap: makeMicronoiseTexture(),
+  envMapIntensity: 1.6,
+});
+
 // ---- Rifle: full-length barrel, receiver block, ring-mounted scope ----
 // Bore line sits below the optic axis; barrel runs the whole rifle length
 // and seats into the receiver. Scope rides on top on two ring mounts.
@@ -346,14 +359,14 @@ const tubeGeo = new THREE.CylinderGeometry(
   true,
 );
 tubeGeo.rotateX(Math.PI / 2);
-const scopeTube = new THREE.Mesh(tubeGeo, weaponMat);
+const scopeTube = new THREE.Mesh(tubeGeo, scopeMat);
 scopeTube.layers.set(1);
 weaponGroup.add(scopeTube);
 
 // Objective bell (wider toward the front/-Z)
 const objBellGeo = new THREE.CylinderGeometry(0.054, 0.064, 0.1, 48, 1, true);
 objBellGeo.rotateX(Math.PI / 2);
-const objBell = new THREE.Mesh(objBellGeo, weaponMat);
+const objBell = new THREE.Mesh(objBellGeo, scopeMat);
 objBell.position.set(0, 0, -0.255);
 objBell.layers.set(1);
 weaponGroup.add(objBell);
@@ -363,20 +376,20 @@ weaponGroup.add(objBell);
 // not a thick black ring around the sight picture.
 const ocuBellGeo = new THREE.CylinderGeometry(0.056, 0.053, 0.06, 48, 1, true);
 ocuBellGeo.rotateX(Math.PI / 2);
-const ocuBell = new THREE.Mesh(ocuBellGeo, weaponMat);
+const ocuBell = new THREE.Mesh(ocuBellGeo, scopeMat);
 ocuBell.position.set(0, 0, 0.235);
 ocuBell.layers.set(1);
 weaponGroup.add(ocuBell);
 
 // Turrets: elevation on top, windage on the right
 const elevGeo = new THREE.CylinderGeometry(0.016, 0.018, 0.035, 24);
-const elevation = new THREE.Mesh(elevGeo, weaponMat);
+const elevation = new THREE.Mesh(elevGeo, scopeMat);
 elevation.position.set(0, 0.068, 0.03);
 elevation.layers.set(1);
 weaponGroup.add(elevation);
 const windGeo = new THREE.CylinderGeometry(0.016, 0.018, 0.035, 24);
 windGeo.rotateZ(Math.PI / 2);
-const windage = new THREE.Mesh(windGeo, weaponMat);
+const windage = new THREE.Mesh(windGeo, scopeMat);
 windage.position.set(0.068, 0, 0.03);
 windage.layers.set(1);
 weaponGroup.add(windage);
@@ -933,7 +946,7 @@ const lensMat = new THREE.ShaderMaterial({
       // peephole, mid-travel is still mostly black tunnel with a sweeping
       // crescent, and the full picture only lands at the end of ADS — like
       // finding the eye box on a real optic. Do NOT linearize this.
-      float eyeBox = smoothstep(0.0, 0.9, uAdsWeight);
+      float eyeBox = smoothstep(0.15, 0.98, uAdsWeight);
       // exit-pupil FOV penalty grows with relief error AND magnification:
       // reliefShrink handles "too far", tooClose handles "inside the pupil".
       float reliefErr = abs(uEyeRelief - 1.0);
@@ -952,7 +965,7 @@ const lensMat = new THREE.ShaderMaterial({
       float transit = (1.0 - eyeBox) * smoothstep(0.0, 0.4, uAdsWeight);
       shadowK *= 1.0 + transit * 1.5;
       // reticle fades in LAST — off-axis eyes see no etch, only tunnel
-      float etchVis = smoothstep(0.45, 0.9, uAdsWeight);
+      float etchVis = smoothstep(0.55, 0.98, uAdsWeight);
       // off-axis transmission collapse: hip peephole runs dark, not full-bright.
       // (uEyeOffset/uEyeRelief are ALREADY zoom-amplified in JS, so no uZoomK
       // here — the "same sway = blacker at high zoom" comes free from that.)
@@ -1143,11 +1156,11 @@ const lensMat = new THREE.ShaderMaterial({
         vec2 gPos2 = gSun * 0.30 + imageCenter;
         float ghost1 = 1.0 - smoothstep(0.0, 0.050, length(uv - gPos1));
         float ghost2 = 1.0 - smoothstep(0.0, 0.028, length(uv - gPos2));
-        sceneColor += vec3(0.85, 0.92, 1.0) * ghost1 * glare * uSunFacing * 0.035 * reticleVis;
-        sceneColor += vec3(1.0, 0.95, 0.85) * ghost2 * glare * uSunFacing * 0.020 * reticleVis;
+        sceneColor += vec3(0.85, 0.92, 1.0) * ghost1 * glare * uSunFacing * 0.016 * reticleVis;
+        sceneColor += vec3(1.0, 0.95, 0.85) * ghost2 * glare * uSunFacing * 0.009 * reticleVis;
         // coma/axial bloom: a sun-side haze that fades across the field
         float coma = pow(max(dot(normalize(uv - imageCenter + vec2(1e-4)), -gSun) * 0.5 + 0.5, 0.0), 8.0);
-        sceneColor += vec3(0.92, 0.92, 0.97) * coma * glare * uSunFacing * 0.045 * reticleVis;
+        sceneColor += vec3(0.92, 0.92, 0.97) * coma * glare * uSunFacing * 0.020 * reticleVis;
       }
 
       // OUTER-RING DOF (toggle T): shallow depth of field lives in the glass —
@@ -1179,11 +1192,14 @@ const lensMat = new THREE.ShaderMaterial({
         // eye pupil is a disc that travels with the eye; the picture shows
         // only where it overlaps the objective field stop. Off-axis the two
         // discs part into a crescent.
-        float slide = min(eyeMag * 2.2, 1.0);
+        float slide = min(eyeMag * 2.4, 1.0);
         vec2 pupilC = imageCenter - eyeDir * currentAperture * slide;
-        float pupilR = currentAperture * 1.04;
+        // The eye pupil is SMALLER than the field stop, so its arc across the
+        // field is always strongly curved — the blackout stays a crescent even
+        // when the sway saturates, never degrading into a straight chord.
+        float pupilR = currentAperture * 0.82;
         float pupilMask = smoothstep(pupilR - shadowK, pupilR, ellR(uv, pupilC, tiltDir, tiltCos));
-        objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.02, 0.14, eyeMag));
+        objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.008, 0.10, eyeMag));
       }
 
       // Tube interior is matte black (baffled — it never catches direct sun).
@@ -1232,7 +1248,7 @@ const lensMat = new THREE.ShaderMaterial({
       // scatter off the black anodizing, so the bore reads as a receding volume
       // instead of a flat ring — the haze is strongest at the far lip and dies
       // toward the ocular.
-      tubeWall += vec3(0.035, 0.045, 0.06)
+      tubeWall += vec3(0.02, 0.026, 0.035)
         * (1.0 - wallBand) * (1.0 - wallBand) * (0.3 + 0.5 * uSunIntensity);
       tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask * transitBoost;
 
@@ -1249,11 +1265,11 @@ const lensMat = new THREE.ShaderMaterial({
         float innerRing = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.012, abs(ir - innerR));
         vec2 innerN = normalize(uv - innerC + vec2(1e-4));
         float innerSun = pow(max(dot(innerN, sunN) * 0.5 + 0.5, 0.0), 4.0);
-        tubeWall += vec3(0.20, 0.19, 0.185) * innerRing
-          * (0.20 + 0.55 * innerSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
+        tubeWall += vec3(0.12, 0.115, 0.11) * innerRing
+          * (0.14 + 0.4 * innerSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
         // objective glass catches a faint blue sky kiss, like coated glass
-        tubeWall += vec3(0.12, 0.16, 0.20) * innerRing * (1.0 - objectiveMask)
-          * (0.08 + 0.25 * uSunIntensity);
+        tubeWall += vec3(0.08, 0.10, 0.12) * innerRing * (1.0 - objectiveMask)
+          * (0.05 + 0.16 * uSunIntensity);
       }
 
       // ---- ERECTOR RING (third glass layer) ----
@@ -1269,8 +1285,8 @@ const lensMat = new THREE.ShaderMaterial({
         float erRing = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.01, abs(er - erR));
         vec2 erN = normalize(uv - erC + vec2(1e-4));
         float erSun = pow(max(dot(erN, sunN) * 0.5 + 0.5, 0.0), 3.0);
-        tubeWall += vec3(0.15, 0.145, 0.14) * erRing
-          * (0.10 + 0.35 * erSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
+        tubeWall += vec3(0.09, 0.088, 0.085) * erRing
+          * (0.08 + 0.28 * erSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
       }
 
       // Tube inner-surface fresnel: the wall is glass, so it reflects a whisper
@@ -1279,34 +1295,37 @@ const lensMat = new THREE.ShaderMaterial({
       // the matte baffles; it rolls with the sun and the eye.
       {
         float grazing = pow(1.0 - clamp(distTube / 0.5, 0.0, 1.0), 1.6);
-        float wallFres = grazing * (0.05 + 0.35 * uSunIntensity);
+        float wallFres = grazing * (0.03 + 0.18 * uSunIntensity);
         vec2 frN = normalize(uv - tubeCenter + vec2(1e-4));
         float frSun = pow(max(dot(frN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-        tubeWall += vec3(0.35, 0.42, 0.48) * wallFres * (0.3 + 0.7 * frSun) * (1.0 - objectiveMask);
+        tubeWall += vec3(0.13, 0.16, 0.19) * wallFres * (0.3 + 0.7 * frSun) * (1.0 - objectiveMask);
       }
 
-      // ---- LAYERED GLASS: objective fresnel + coating sheen + sky veil ----
-      // A scope is a stack of coated elements, each reflecting a little:
-      // (1) the objective front element reflects the sky/sun BACK through the
-      // picture — a cool fresnel veil that strengthens at grazing angles and
-      // sits ON TOP of the image like a real glass pane; (2) the ocular's
-      // MgF2 coating sheen (magenta/green) rides the rim and swings with the
-      // sun side; (3) a sky-colored fresnel washes the outer field. Together
-      // they make the picture read as "behind several layers of glass".
+      // ---- LAYERED GLASS (subtle, near-neutral) ----
+      // A scope is a stack of coated elements; each reflects a LITTLE. Keep
+      // them near-neutral and barely-there so the picture stays "scope ==
+      // world" — a faint glass pane, never a colored wash. All of them
+      // strengthen off-axis (eye sway = grazing angle) and with magnification,
+      // which is why they previously only read during the shoulder travel.
       {
-        // objective fresnel: cool sky reflection, strongest at the rim
-        float objFres = smoothstep(0.12, 0.5, distFromCenter);
+        float fresSway = min(swayDist * 2.5, 1.0);
+        float fresZoom = clamp((uZoomK - 1.0) * 0.25, 0.0, 1.0);
+        float fresBoost = (0.35 + 0.65 * fresSway) * (1.0 + fresZoom);
+        // objective fresnel: dark neutral reflection, faint cool lift at the
+        // rim, stronger off-axis / zoomed — sits behind the image like glass
+        float objFres = smoothstep(0.14, 0.5, distFromCenter);
         objFres *= objFres;
-        vec3 objRefl = mix(vec3(0.06, 0.08, 0.11), vec3(0.55, 0.62, 0.72), objFres);
+        vec3 objRefl = mix(vec3(0.03, 0.035, 0.045), vec3(0.20, 0.24, 0.30), objFres);
         sceneColor = mix(sceneColor, objRefl,
-          objFres * (0.10 + 0.30 * uSunIntensity) * (1.0 - objectiveMask));
-        // MgF2 coating sheen, magenta center → green rim, sun-side dependent
-        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.16;
-        vec3 coat = mix(vec3(1.0, 0.35, 0.9), vec3(0.35, 1.0, 0.55), 0.5 + 0.5 * dot(tubeN, sunN));
+          objFres * (0.05 + 0.14 * uSunIntensity) * fresBoost * (1.0 - objectiveMask));
+        // MgF2 coating sheen: faint magenta/green, sun-side, sweeps with the eye
+        vec2 coatDir = normalize(uSunSide + uEyeOffset * 5.0 + vec2(1e-4));
+        float sheenAmt = smoothstep(0.30, 0.5, distFromCenter) * (0.15 + 0.6 * uSunIntensity) * 0.05 * fresBoost;
+        vec3 coat = mix(vec3(0.5, 0.22, 0.45), vec3(0.22, 0.5, 0.30), 0.5 + 0.5 * dot(tubeN, coatDir));
         sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
-        // sky fresnel veil over the image rim — the world reflecting back
-        float veil = pow(smoothstep(0.3, 0.5, distFromCenter), 2.0) * 0.11 * (0.3 + 0.7 * uSunIntensity);
-        sceneColor = mix(sceneColor, vec3(0.5, 0.56, 0.62), veil * (1.0 - objectiveMask));
+        // sky fresnel veil: a whisper, mostly neutral, rim-only
+        float veil = pow(smoothstep(0.32, 0.5, distFromCenter), 2.0) * 0.045 * (0.3 + 0.7 * uSunIntensity) * fresBoost;
+        sceneColor = mix(sceneColor, vec3(0.42, 0.46, 0.50), veil * (1.0 - objectiveMask));
       }
 
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
@@ -1446,11 +1465,11 @@ function addGlass(
 }
 
 // Sniper: ocular surface just inside the bell mouth, objective deep in the bell
-addGlass(sniperGroup, 0.054, 0.262, true, 1.0);
-addGlass(sniperGroup, 0.06, -0.298, false, 1.2);
+addGlass(sniperGroup, 0.054, 0.262, true, 1.5);
+addGlass(sniperGroup, 0.06, -0.298, false, 1.3);
 // ACOG: compact cups, same treatment
-addGlass(acogGroup, 0.036, 0.17, true, 1.0);
-addGlass(acogGroup, 0.042, -0.166, false, 1.2);
+addGlass(acogGroup, 0.036, 0.17, true, 1.5);
+addGlass(acogGroup, 0.042, -0.166, false, 1.3);
 
 interface ScopeConfig {
   fov: number;
@@ -1508,8 +1527,12 @@ document.addEventListener('mousemove', (event: MouseEvent) => {
   moveImpX += movementX;
   moveImpY += movementY;
 
-  mouseVelocityX += movementX * 0.001 * fovRatio;
-  mouseVelocityY += movementY * 0.001 * fovRatio;
+  // The weapon's physical lag is driven by the RAW mouse impulse, not the
+  // zoom-scaled view sensitivity — a rifle has the same inertia at any
+  // magnification. Scaling by fovRatio here left the ADS lag ~20x too small,
+  // which is why no eye relief showed while tracking at high zoom.
+  mouseVelocityX += movementX * 0.001;
+  mouseVelocityY += movementY * 0.001;
 });
 
 document.addEventListener('mousedown', (e: MouseEvent) => {
@@ -1896,16 +1919,18 @@ function animate(): void {
     const baseRotY = THREE.MathUtils.lerp(0.15, 0.0, targetWeight);
     const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
     {
-      // Mouse lag is halved here: the cheek weld tracks the head tighter so a
-      // tracking turn doesn't swim the sight picture, while breathing + stride
-      // swing keep the physical "gun has mass" sway. Recoil still punches in.
-      const tRX = -mouseVelocityY * 0.5 + breathRY + stepRX + kickPitch;
-      const tRY = baseRotY - mouseVelocityX * 0.5 + breathRX + stepRY;
-      const tRZ = baseRotZ - mouseVelocityX * 0.4 + breathRR + stepRR + kickRoll;
-      const KR = 160;
-      const CR = 20.0;
-      const KP = 110;
-      const CP = 18.9;
+      // Mouse lag is the eye-relief driver: the cheek weld tracks the head
+      // tightly, but a rifle still carries inertia, so the gun lags the head
+      // on quick movements — that relative rotation is what pushes the eye off
+      // axis and opens the eye-box crescent. Breathing + stride keep the slow
+      // physical sway; recoil still punches in.
+      const tRX = -mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch;
+      const tRY = baseRotY - mouseVelocityX * 0.9 + breathRX + stepRY;
+      const tRZ = baseRotZ - mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll;
+      const KR = 128;
+      const CR = 17.0;
+      const KP = 88;
+      const CP = 16.8;
       wRotVel.x += ((tRX - wRot.x) * KR - wRotVel.x * CR) * delta;
       wRotVel.y += ((tRY - wRot.y) * KR - wRotVel.y * CR) * delta;
       wRotVel.z += ((tRZ - wRot.z) * KR - wRotVel.z * CR) * delta;
@@ -1971,18 +1996,18 @@ function animate(): void {
         3.0,
       );
 
-      // Distance-punished eye box: short drifts stay nearly free (gain ~0.25),
-      // long drifts get punished (gain → 1.0+). Small corrections keep a
-      // clean picture; only genuinely long sways close the shadow hard.
+      // Distance-punished eye box: short drifts stay mostly free, long drifts
+      // get punished. Base gain raised so mouse-driven weapon lag registers as
+      // visible eye relief even at base zoom; zoomTighten amplifies it further.
       const rawX = _eyeLocal.x / tubeR;
       const rawY = _eyeLocal.y / tubeR;
       const rawMag = Math.hypot(rawX, rawY);
       const distGain =
-        0.3 + 0.7 * THREE.MathUtils.smoothstep(rawMag, 0.4, 1.8);
+        0.55 + 0.45 * THREE.MathUtils.smoothstep(rawMag, 0.3, 1.5);
       const softX = Math.tanh(rawX * 0.9) * distGain * zoomTighten;
       const softY = Math.tanh(rawY * 0.9) * distGain * zoomTighten;
-      const eyeU = THREE.MathUtils.clamp(softX * 0.6, -0.3, 0.3);
-      const eyeV = THREE.MathUtils.clamp(softY * 0.6, -0.3, 0.3);
+      const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
+      const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
       // Operator re-seat, asymmetric: the eye LOSES the box fast (attack)
       // and re-finds it slowly (release). Fast L-R flicks punch shadow in
       // on every reversal instead of averaging out to nothing.
