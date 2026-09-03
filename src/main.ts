@@ -993,14 +993,15 @@ const lensMat = new THREE.ShaderMaterial({
       // Rim-weighted barrel + fisheye distortion: the ocular is a curved glass
       // element, so the whole field bows around the optical axis — straight
       // world lines near the rim curve like looking into a sphere. Radial in
-      // r², so the center is naturally untouched and the edge bows hardest.
+      // r² + r⁴, so the center stays flat and the edge bows hardest. Amplitude
+      // grows with eye relief (sway) and hard zoom, so the distortion lives at
+      // the screen edge exactly where eye relief and magnification bite.
       // Distorted around the shifted image plane so glass feels volumetric.
-      // Image stays UPRIGHT at hip by design: a real scope's erector lenses
-      // flip the objective's inverted image before the ocular, so the eye
-      // always gets an upright picture.
       vec2 imgUv = uv + imageShift;
+      float swayBoost = min(swayDist * 2.0, 1.0);
+      float zoomBoost = clamp((uZoomK - 1.0) * 0.45, 0.0, 1.0);
       // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
-      float barrelK = mix(-0.16, -0.09, uAdsWeight);
+      float barrelK = mix(-0.15, -0.09, uAdsWeight) * (1.0 + 0.8 * swayBoost + 1.2 * zoomBoost);
       vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
@@ -1193,12 +1194,13 @@ const lensMat = new THREE.ShaderMaterial({
         // eye pupil is a disc that travels with the eye; the picture shows
         // only where it overlaps the objective field stop. Off-axis the two
         // discs part into a crescent.
-        float slide = min(eyeMag * 2.4, 1.0);
+        float slide = min(eyeMag * 2.0, 0.8);
         vec2 pupilC = imageCenter - eyeDir * currentAperture * slide;
-        // The eye pupil is SMALLER than the field stop, so its arc across the
-        // field is always strongly curved — the blackout stays a crescent even
-        // when the sway saturates, never degrading into a straight chord.
-        float pupilR = currentAperture * 0.82;
+        // Eye pupil is ~the same size as the field stop: sliding it yields ONE
+        // crescent (a lens bounded by two equal arcs) that reads as a single
+        // kidney-bean, not two separate circles. Slide is capped so the arc
+        // never flattens into a straight chord at saturated sway.
+        float pupilR = currentAperture * 0.98;
         float pupilMask = smoothstep(pupilR - shadowK, pupilR, ellR(uv, pupilC, tiltDir, tiltCos));
         objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.008, 0.10, eyeMag));
       }
