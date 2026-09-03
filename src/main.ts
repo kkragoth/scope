@@ -852,6 +852,15 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 perp = d - dir * par;
       return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
+    // Radial barrel/fisheye warp around the optical axis. k < 0 barrels (the
+    // classic scope "bulge"): center magnified, rim compressed and bowed. One
+    // shared function so the image AND the etched reticle curve identically —
+    // they live on the same curved field, so a flat reticle over a warped
+    // picture is exactly the "plastered" look we avoid.
+    vec2 barrelWarp(vec2 p, float k) {
+      float r2 = dot(p, p);
+      return p * (1.0 + k * r2);
+    }
     // Chromatic sample at one bent coord. Transverse CA: R/B bend linearly
     // with radius (real lateral color scales ~r, not r^2) — the fringe is
     // invisible at center and grows to a couple px at the rim. 'axial' adds a
@@ -968,18 +977,18 @@ const lensMat = new THREE.ShaderMaterial({
       // around the green focal plane (axial CA). Grows with relief error + zoom.
       float axialAberration = uAberration * (0.35 + blurMix * 1.6) * caMask;
 
-      // Rim-weighted barrel distortion: zero in the center, tiny bulge at the
-      // outer circle only (~3px at the rim at ADS). Real ocular glass bends
-      // the edge of the sight picture; keep it barely-there, never fisheye.
+      // Rim-weighted barrel + fisheye distortion: the ocular is a curved glass
+      // element, so the whole field bows around the optical axis — straight
+      // world lines near the rim curve like looking into a sphere. Radial in
+      // r², so the center is naturally untouched and the edge bows hardest.
       // Distorted around the shifted image plane so glass feels volumetric.
       // Image stays UPRIGHT at hip by design: a real scope's erector lenses
       // flip the objective's inverted image before the ocular, so the eye
       // always gets an upright picture.
       vec2 imgUv = uv + imageShift;
-      float imgR = length(imgUv);
-      float rimT = smoothstep(0.15, 0.5, imgR);
-      float barrelK = mix(0.016, 0.010, uAdsWeight);
-      vec2 baseUv = imgUv * (1.0 - barrelK * rimT * rimT);
+      // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
+      float barrelK = mix(-0.14, -0.075, uAdsWeight);
+      vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
       float blurR = blurMix * 0.006;
@@ -1030,10 +1039,10 @@ const lensMat = new THREE.ShaderMaterial({
       // eye-space coords back into gun-space by -roll to draw that.
       vec2 rc = uv - reticleCenter;
       // Seat the etch IN the glass: bend it with the same ocular curvature as
-      // the image (barrelK from above), so outer posts curve with the rim
-      // while the center stays put. A flat overlay is what read as "plastered".
-      float rimR = smoothstep(0.15, 0.5, length(rc));
-      vec2 rcBent = rc * (1.0 - barrelK * rimR * rimR);
+      // the image (barrelWarp + barrelK from above), so outer posts curve with
+      // the rim while the center stays put. A flat overlay is what read as
+      // "plastered".
+      vec2 rcBent = barrelWarp(rc, barrelK);
       float cR = cos(uReticleRoll);
       float sR = sin(uReticleRoll);
       vec2 rcGun = vec2(cR * rcBent.x + sR * rcBent.y, -sR * rcBent.x + cR * rcBent.y);
@@ -1127,10 +1136,18 @@ const lensMat = new THREE.ShaderMaterial({
         vec2 gSun = length(uSunSide) > 1e-4 ? normalize(uSunSide) : vec2(0.4, 0.65);
         float glare = uSunFacing * uSunFacing * uSunFacing;
         sceneColor += vec3(1.0, 0.96, 0.90) * glare * 0.018 * reticleVis;
-        // faint cool ghost orb, mirrored opposite the sun side
-        vec2 gPos = -gSun * 0.16 + imageCenter;
-        float ghost = 1.0 - smoothstep(0.0, 0.045, length(uv - gPos));
-        sceneColor += vec3(0.85, 0.92, 1.0) * ghost * glare * uSunFacing * 0.03 * reticleVis;
+        // two ghost orbs: the internal double-reflection of the objective —
+        // one cool, one warm, mirrored across the optical axis (classic
+        // multi-element scope flare that only shows into the sun).
+        vec2 gPos1 = -gSun * 0.16 + imageCenter;
+        vec2 gPos2 = gSun * 0.30 + imageCenter;
+        float ghost1 = 1.0 - smoothstep(0.0, 0.050, length(uv - gPos1));
+        float ghost2 = 1.0 - smoothstep(0.0, 0.028, length(uv - gPos2));
+        sceneColor += vec3(0.85, 0.92, 1.0) * ghost1 * glare * uSunFacing * 0.035 * reticleVis;
+        sceneColor += vec3(1.0, 0.95, 0.85) * ghost2 * glare * uSunFacing * 0.020 * reticleVis;
+        // coma/axial bloom: a sun-side haze that fades across the field
+        float coma = pow(max(dot(normalize(uv - imageCenter + vec2(1e-4)), -gSun) * 0.5 + 0.5, 0.0), 8.0);
+        sceneColor += vec3(0.92, 0.92, 0.97) * coma * glare * uSunFacing * 0.045 * reticleVis;
       }
 
       // OUTER-RING DOF (toggle T): shallow depth of field lives in the glass —
@@ -1211,6 +1228,12 @@ const lensMat = new THREE.ShaderMaterial({
       tubeWall *= (0.78 + 0.22 * baffles);
       // depth falloff: the far end of the tunnel falls darker (tube length read)
       tubeWall *= mix(1.0, 0.55, smoothstep(currentAperture, 0.5, distTube));
+      // atmospheric depth haze: the deep (objective) end picks up a faint cool
+      // scatter off the black anodizing, so the bore reads as a receding volume
+      // instead of a flat ring — the haze is strongest at the far lip and dies
+      // toward the ocular.
+      tubeWall += vec3(0.035, 0.045, 0.06)
+        * (1.0 - wallBand) * (1.0 - wallBand) * (0.3 + 0.5 * uSunIntensity);
       tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask * transitBoost;
 
       // ---- INNER OBJECTIVE RING (second glass layer, depth parallax) ----
@@ -1233,6 +1256,23 @@ const lensMat = new THREE.ShaderMaterial({
           * (0.08 + 0.25 * uSunIntensity);
       }
 
+      // ---- ERECTOR RING (third glass layer) ----
+      // The erector tube is the narrow internal cylinder between the objective
+      // and ocular. Its near lip is a THIRD ring at its own parallax rate —
+      // shallower than the objective (shifts less) but deeper than the ocular
+      // (shifts more), so off-axis the rings slide at three distinct speeds and
+      // the interior reads as a real receding bore, not concentric paint.
+      {
+        vec2 erC = -uEyeOffset * 0.45;
+        float erR = mix(currentAperture, 0.485, 0.34);
+        float er = ellR(uv, erC, tiltDir, tiltCos);
+        float erRing = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.01, abs(er - erR));
+        vec2 erN = normalize(uv - erC + vec2(1e-4));
+        float erSun = pow(max(dot(erN, sunN) * 0.5 + 0.5, 0.0), 3.0);
+        tubeWall += vec3(0.15, 0.145, 0.14) * erRing
+          * (0.10 + 0.35 * erSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
+      }
+
       // Tube inner-surface fresnel: the wall is glass, so it reflects a whisper
       // of the world at grazing angles near the ocular — bright rim, black
       // center. This is the "looking down a glass tube" sheen, distinct from
@@ -1245,14 +1285,27 @@ const lensMat = new THREE.ShaderMaterial({
         tubeWall += vec3(0.35, 0.42, 0.48) * wallFres * (0.3 + 0.7 * frSun) * (1.0 - objectiveMask);
       }
 
-      // Lens-coating sheen (MgF2-style): magenta/green shift that lives near
-      // the rim and swings hue with the sun side. Plus a sky-colored fresnel
-      // veil over the image rim — glass reflects the world back at you.
+      // ---- LAYERED GLASS: objective fresnel + coating sheen + sky veil ----
+      // A scope is a stack of coated elements, each reflecting a little:
+      // (1) the objective front element reflects the sky/sun BACK through the
+      // picture — a cool fresnel veil that strengthens at grazing angles and
+      // sits ON TOP of the image like a real glass pane; (2) the ocular's
+      // MgF2 coating sheen (magenta/green) rides the rim and swings with the
+      // sun side; (3) a sky-colored fresnel washes the outer field. Together
+      // they make the picture read as "behind several layers of glass".
       {
-        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.14;
+        // objective fresnel: cool sky reflection, strongest at the rim
+        float objFres = smoothstep(0.12, 0.5, distFromCenter);
+        objFres *= objFres;
+        vec3 objRefl = mix(vec3(0.06, 0.08, 0.11), vec3(0.55, 0.62, 0.72), objFres);
+        sceneColor = mix(sceneColor, objRefl,
+          objFres * (0.10 + 0.30 * uSunIntensity) * (1.0 - objectiveMask));
+        // MgF2 coating sheen, magenta center → green rim, sun-side dependent
+        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.16;
         vec3 coat = mix(vec3(1.0, 0.35, 0.9), vec3(0.35, 1.0, 0.55), 0.5 + 0.5 * dot(tubeN, sunN));
         sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
-        float veil = pow(smoothstep(0.3, 0.5, distFromCenter), 2.0) * 0.10 * (0.3 + 0.7 * uSunIntensity);
+        // sky fresnel veil over the image rim — the world reflecting back
+        float veil = pow(smoothstep(0.3, 0.5, distFromCenter), 2.0) * 0.11 * (0.3 + 0.7 * uSunIntensity);
         sceneColor = mix(sceneColor, vec3(0.5, 0.56, 0.62), veil * (1.0 - objectiveMask));
       }
 
