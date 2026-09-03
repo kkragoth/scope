@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import './style.css';
 
 const scene = new THREE.Scene();
@@ -22,12 +23,33 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
+
+// Image-based lighting: one-time PMREM bake gives metals/glass something to
+// reflect. Kept subtle (0.3) so the sun stays the key light.
+{
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = 0.3;
+  pmrem.dispose();
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.85));
 const dirLight = new THREE.DirectionalLight(0xfff2e0, 1.35);
 dirLight.position.copy(SUN_DIR).multiplyScalar(50);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.left = -45;
+dirLight.shadow.camera.right = 45;
+dirLight.shadow.camera.top = 45;
+dirLight.shadow.camera.bottom = -45;
+dirLight.shadow.camera.near = 1;
+dirLight.shadow.camera.far = 220;
+dirLight.shadow.bias = -0.0004;
 scene.add(dirLight);
+scene.add(dirLight.target);
 
 // Gradient sky dome with HDR-ish sun disc (values >1, ACES rolls it off).
 // Cheaper and more controllable than an HDR env texture for this scene;
@@ -124,9 +146,44 @@ scene.add(sunSprite);
 const _camWorld = new THREE.Vector3();
 
 const floorGeo = new THREE.PlaneGeometry(500, 500, 20, 20);
-const floorMat = new THREE.MeshStandardMaterial({ color: 0x5a6252 });
+// Procedural ground: olive-dirt speckle baked once, tiled. Flat albedo was
+// half the "cheap" look.
+function makeGroundTexture(): THREE.CanvasTexture {
+  const S = 256;
+  const c = document.createElement('canvas');
+  c.width = S;
+  c.height = S;
+  const ctx = c.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#767b63';
+  ctx.fillRect(0, 0, S, S);
+  for (let i = 0; i < 26; i++) {
+    const x = Math.random() * S;
+    const y = Math.random() * S;
+    const r = 14 + Math.random() * 46;
+    const dark = Math.random() < 0.5;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, dark ? 'rgba(70,72,52,0.20)' : 'rgba(140,142,116,0.16)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  for (let i = 0; i < 2600; i++) {
+    const v = Math.random();
+    ctx.fillStyle =
+      v < 0.45 ? 'rgba(60,62,44,0.35)' : v < 0.8 ? 'rgba(150,152,124,0.30)' : 'rgba(96,88,66,0.35)';
+    ctx.fillRect(Math.random() * S, Math.random() * S, 1.5, 1.5);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(48, 48);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const floorMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), roughness: 1.0 });
 const floor = new THREE.Mesh(floorGeo, floorMat);
 floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
 scene.add(floor);
 
 const boxGeo = new THREE.BoxGeometry(2, 10, 2);
@@ -142,16 +199,27 @@ const boxMesh = new THREE.InstancedMesh(
 {
   const m = new THREE.Matrix4();
   const col = new THREE.Color();
+  // Muted military palette (tan / olive / grey) — neon boxes were cheap.
+  const pal: Array<[number, number]> = [
+    [0.09, 0.18],
+    [0.13, 0.14],
+    [0.25, 0.12],
+    [0.0, 0.0],
+    [0.08, 0.28],
+  ];
   for (let i = 0; i < BOX_COUNT; i++) {
     m.makeTranslation((Math.random() - 0.5) * 300, 5, (Math.random() - 0.5) * 300);
     boxMesh.setMatrixAt(i, m);
-    boxMesh.setColorAt(i, col.setHSL(Math.random(), 0.32, 0.42));
+    const p = pal[(Math.random() * pal.length) | 0];
+    boxMesh.setColorAt(i, col.setHSL(p[0] + (Math.random() - 0.5) * 0.02, p[1], 0.3 + Math.random() * 0.15));
   }
   boxMesh.instanceMatrix.needsUpdate = true;
   if (boxMesh.instanceColor) boxMesh.instanceColor.needsUpdate = true;
   // Instances spread ±150m but the base geometry bounds sit at the origin —
   // without this the whole batch vanishes whenever the origin leaves frustum.
   boxMesh.frustumCulled = false;
+  boxMesh.castShadow = true;
+  boxMesh.receiveShadow = true;
 }
 scene.add(boxMesh);
 const occluders: THREE.Object3D[] = [floor, boxMesh];
@@ -531,6 +599,30 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 perp = d - dir * par;
       return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
+    // Chromatic sample at one bent coord (CA splits R/B around it).
+    vec3 sampleSight(vec2 buv, float br2v, float aberr) {
+      vec2 sR = buv * (1.0 - aberr * br2v);
+      vec2 sB = buv * (1.0 + aberr * br2v);
+      float rr = texture2D(tDiffuse, sR + 0.5).r;
+      float gg = texture2D(tDiffuse, buv + 0.5).g;
+      float bb = texture2D(tDiffuse, sB + 0.5).b;
+      return vec3(rr, gg, bb);
+    }
+    // Analytically anti-aliased primitives (fwidth): etch lines stay hairline
+    // without shimmering at 1px widths.
+    float aaLine(float c, float w) {
+      float aa = fwidth(c) * 1.2;
+      return 1.0 - smoothstep(w - aa, w + aa, abs(c));
+    }
+    float aaRange(float c, float hi) {
+      float aa = fwidth(c) * 1.2;
+      return 1.0 - smoothstep(hi - aa, hi + aa, abs(c));
+    }
+    float aaBand(float c, float lo, float hi) {
+      float aa = fwidth(c) * 1.2;
+      return smoothstep(lo - aa, lo + aa, abs(c))
+        * (1.0 - smoothstep(hi - aa, hi + aa, abs(c)));
+    }
 
     void main() {
       vec2 uv = vUv - 0.5;
@@ -605,15 +697,18 @@ const lensMat = new THREE.ShaderMaterial({
       float barrelK = mix(0.012, 0.008, uAdsWeight);
       vec2 baseUv = imgUv * (1.0 - barrelK * rimT * rimT);
       float br2 = dot(baseUv, baseUv);
-      vec2 sampR = baseUv * (1.0 - dynamicAberration * br2);
-      vec2 sampG = baseUv;
-      vec2 sampB = baseUv * (1.0 + dynamicAberration * br2);
 
-      // ---- NEUTRAL GLASS: no blue push, keep scope == world ----
-      float r = texture2D(tDiffuse, sampR + 0.5).r;
-      float g = texture2D(tDiffuse, sampG + 0.5).g;
-      float b = texture2D(tDiffuse, sampB + 0.5).b;
-      vec3 sceneColor = vec3(r, g, b);
+      // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
+      // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
+      // just darkness). 5-tap cross, radius tracks total eye error.
+      float blurMix = clamp(abs(uEyeRelief - 1.0) * 0.9 + swayDist * (uZoomK - 1.0) * 0.6, 0.0, 1.0);
+      float blurR = blurMix * 0.006;
+      vec3 sharpC = sampleSight(baseUv, br2, dynamicAberration);
+      vec3 bx = (sampleSight(baseUv + vec2(blurR, 0.0), br2, dynamicAberration)
+        + sampleSight(baseUv - vec2(blurR, 0.0), br2, dynamicAberration)) * 0.5;
+      vec3 by = (sampleSight(baseUv + vec2(0.0, blurR), br2, dynamicAberration)
+        + sampleSight(baseUv - vec2(0.0, blurR), br2, dynamicAberration)) * 0.5;
+      vec3 sceneColor = mix(sharpC, (bx + by) * 0.5, blurMix);
       // Coated-glass transmission loss + off-axis dimming: ADS center runs
       // ~78% of naked-eye brightness, hip peephole collapses toward 30%.
       // (Deliberately under, not over — the old 0.9 + additive lifts read as
@@ -666,20 +761,23 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 p = rcGun / (uReticleScale * (0.92 + 0.08 * uEyeRelief));
       bool isAcog = uOpticMode > 0.5;
 
-      // SNIPER etch: full thin mil cross + thick outer posts + mil dots
-      float sLineX = step(abs(p.x), 0.0011) * step(abs(p.y), 0.4);
-      float sLineY = step(abs(p.y), 0.0011) * step(abs(p.x), 0.4);
-      float sPostX = step(abs(p.x), 0.0035) * step(0.12, abs(p.y)) * step(abs(p.y), 0.4);
-      float sPostY = step(abs(p.y), 0.0035) * step(0.12, abs(p.x)) * step(abs(p.x), 0.4);
-      float sDotsX = step(mod(abs(p.x) + 0.025, 0.05), 0.0025) * step(abs(p.y), 0.0025) * step(abs(p.x), 0.12);
-      float sDotsY = step(mod(abs(p.y) + 0.025, 0.05), 0.0025) * step(abs(p.x), 0.0025) * step(abs(p.y), 0.12);
+      // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
+      // first off-axis — tiny features go before lines, like real glass.
+      float defK = 1.0 + min(swayDist * 2.0, 1.0);
+      float sLineX = aaLine(p.x, 0.0011 * defK) * aaRange(p.y, 0.4);
+      float sLineY = aaLine(p.y, 0.0011 * defK) * aaRange(p.x, 0.4);
+      float sPostX = aaLine(p.x, 0.0035 * defK) * aaBand(p.y, 0.12, 0.4);
+      float sPostY = aaLine(p.y, 0.0035 * defK) * aaBand(p.x, 0.12, 0.4);
+      float dotStay = 1.0 - blurMix * 0.8;
+      float sDotsX = step(mod(abs(p.x) + 0.025, 0.05), 0.0025) * step(abs(p.y), 0.0025) * step(abs(p.x), 0.12) * dotStay;
+      float sDotsY = step(mod(abs(p.y) + 0.025, 0.05), 0.0025) * step(abs(p.x), 0.0025) * step(abs(p.y), 0.12) * dotStay;
       float sniperEtch = clamp(sLineX + sLineY + sPostX + sPostY + sDotsX + sDotsY, 0.0, 1.0);
 
       // ACOG etch: short center ticks + thick outer posts only, no full cross
-      float aTickX = step(abs(p.x), 0.0012) * step(abs(p.y), 0.07);
-      float aTickY = step(abs(p.y), 0.0012) * step(abs(p.x), 0.07);
-      float aPostX = step(abs(p.x), 0.004) * step(0.14, abs(p.y)) * step(abs(p.y), 0.4);
-      float aPostY = step(abs(p.y), 0.004) * step(0.14, abs(p.x)) * step(abs(p.x), 0.4);
+      float aTickX = aaLine(p.x, 0.0012 * defK) * aaRange(p.y, 0.07);
+      float aTickY = aaLine(p.y, 0.0012 * defK) * aaRange(p.x, 0.07);
+      float aPostX = aaLine(p.x, 0.004 * defK) * aaBand(p.y, 0.14, 0.4);
+      float aPostY = aaLine(p.y, 0.004 * defK) * aaBand(p.x, 0.14, 0.4);
       float acogEtch = clamp(aTickX + aTickY + aPostX + aPostY, 0.0, 1.0);
       float etchedMask = isAcog ? acogEtch : sniperEtch;
 
@@ -695,16 +793,20 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 footL = vec2(-0.02, -0.016);
       vec2 footR = vec2(0.02, -0.016);
       float dChev = min(sdSegment(p, apex, footL), sdSegment(p, apex, footR));
-      float sniperCore = (1.0 - smoothstep(0.0016, 0.0016 + 0.001 * focusW, dChev))
-        + (1.0 - smoothstep(0.0012, 0.0012 + 0.001 * focusW, length(p - apex))) * 0.7;
+      // fwidth floors: sub-pixel edges widen instead of sparkling.
+      float wChev = max(0.001 * focusW, fwidth(dChev) * 1.5);
+      float sniperCore = (1.0 - smoothstep(0.0016, 0.0016 + wChev, dChev))
+        + (1.0 - smoothstep(0.0012, 0.0012 + wChev, length(p - apex))) * 0.7;
 
       // ACOG / RED DOT illumination: big glowing dot + horseshoe ring
       float dDot = length(p);
-      float dotCore = 1.0 - smoothstep(0.0035, 0.0035 + 0.002 * focusW, dDot);
+      float wDot = max(0.002 * focusW, fwidth(dDot) * 1.5);
+      float dotCore = 1.0 - smoothstep(0.0035, 0.0035 + wDot, dDot);
       float dRing = abs(dDot - 0.032);
       float ringAng = atan(p.y, p.x); // horseshoe gap at bottom (angle ~ -PI/2)
       float ringGate = smoothstep(0.3, 0.55, abs(ringAng + 1.5708));
-      float horseCore = (1.0 - smoothstep(0.0018, 0.0018 + 0.0014 * focusW, dRing)) * ringGate;
+      float wRing = max(0.0014 * focusW, fwidth(dRing) * 1.5);
+      float horseCore = (1.0 - smoothstep(0.0018, 0.0018 + wRing, dRing)) * ringGate;
       float acogCore = clamp(dotCore + horseCore, 0.0, 1.0);
 
       float illumMask = (isAcog ? acogCore : clamp(sniperCore, 0.0, 1.0)) * illumDim;
@@ -785,6 +887,17 @@ const lensMat = new THREE.ShaderMaterial({
       float sunSideLight = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 4.0);
       vec3 tubeWall = vec3(0.008, 0.008, 0.008)
         + vec3(0.10, 0.088, 0.075) * (wallBand * wallBand) * sunSideLight * uSunFacing * 0.25;
+      // FAR INNER WALL: looking down a pipe off-axis, the opposite wall shows
+      // itself — a soft band on the far side that travels with the eye. This
+      // is the strongest "hollow tube" cue; it needs no sun (ambient bounce).
+      {
+        float eyeMag2 = length(uEyeOffset);
+        vec2 eyeDir2 = eyeMag2 > 1e-4 ? uEyeOffset / eyeMag2 : vec2(0.0);
+        float farSide = pow(max(dot(tubeN, -eyeDir2) * 0.5 + 0.5, 0.0), 3.0);
+        float midWall = wallBand * (1.0 - wallBand) * 4.0;
+        tubeWall += vec3(0.10, 0.095, 0.09) * farSide * midWall
+          * (0.10 + min(eyeMag2 * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
+      }
       // thin objective-bell crescent right at the image edge, sun side only
       float crescentLine = 1.0 - smoothstep(0.0, 0.022, abs(distTube - currentAperture));
       float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
@@ -798,26 +911,33 @@ const lensMat = new THREE.ShaderMaterial({
       // catch a hairline highlight on the sun side at glancing angles.
       // transitBoost: looking down the tube at an angle mid-shoulder, the
       // rings catch light and read as depth — once seated they go near-black.
+      // Chirped spacing (rings bunch toward the far end) fakes pipe
+      // perspective — even spacing reads flat, bunching reads deep.
       float transitBoost = (1.0 + transit * 1.2) * (1.0 + (uZoomK - 1.0) * 0.3);
-      float baffles = 0.5 + 0.5 * sin(distTube * 240.0);
-      tubeWall *= (0.82 + 0.18 * baffles);
+      float baffles = 0.5 + 0.5 * sin(distTube * (200.0 + distTube * 160.0));
+      tubeWall *= (0.78 + 0.22 * baffles);
       // depth falloff: the far end of the tunnel falls darker (tube length read)
       tubeWall *= mix(1.0, 0.55, smoothstep(currentAperture, 0.5, distTube));
       tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask * transitBoost;
 
-      // Lens-coating sheen (MgF2-style): faint magenta/green shift that only
-      // exists near the rim and swings hue with the sun side. Dies head-on.
+      // Lens-coating sheen (MgF2-style): magenta/green shift that lives near
+      // the rim and swings hue with the sun side. Plus a sky-colored fresnel
+      // veil over the image rim — glass reflects the world back at you.
       {
-        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.08;
+        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.14;
         vec3 coat = mix(vec3(1.0, 0.35, 0.9), vec3(0.35, 1.0, 0.55), 0.5 + 0.5 * dot(tubeN, sunN));
         sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
+        float veil = pow(smoothstep(0.3, 0.5, distFromCenter), 2.0) * 0.10 * (0.3 + 0.7 * uSunIntensity);
+        sceneColor = mix(sceneColor, vec3(0.5, 0.56, 0.62), veil * (1.0 - objectiveMask));
       }
 
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
 
-      // ocular rim: hard clip + one minimal thin sun-line on the very edge
+      // ocular rim: hard clip + machined inner bevel + thin sun-line on edge
       float ocularShadow = smoothstep(0.485, 0.5, distOcular);
       float ringBand = 1.0 - smoothstep(0.0, 0.006, abs(distOcular - 0.48));
+      // bevel: hairline lit chamfer just inside the rim sells the metal edge
+      float bevel = 1.0 - smoothstep(0.0, 0.010, abs(distOcular - 0.466));
       vec2 ocuN = distOcular > 1e-4 ? uv / distOcular : vec2(0.0, 1.0);
       float ringGlint = pow(max(dot(ocuN, sunN) * 0.5 + 0.5, 0.0), 3.0);
       vec3 ringLight = vec3(0.92, 0.92, 0.92) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.45);
@@ -825,6 +945,8 @@ const lensMat = new THREE.ShaderMaterial({
       float ringShade = pow(max(dot(ocuN, -sunN) * 0.5 + 0.5, 0.0), 2.0);
       viewWithTunnel -= vec3(0.05) * ringBand * ringShade;
       viewWithTunnel += ringLight;
+      // bevel chamfer catches a duller, broader light than the rim line
+      viewWithTunnel += vec3(0.10, 0.10, 0.105) * bevel * (0.25 + 0.45 * ringGlint);
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
@@ -855,6 +977,101 @@ const aLens = new THREE.Mesh(aLensGeo, lensMat);
 aLens.position.z = 0.168;
 aLens.layers.set(1);
 acogGroup.add(aLens);
+
+// ---- PHYSICAL GLASS LAYERS: ocular surface (eye side) + objective front
+// element (barrel end). The lens shader above is the *sight picture*; these
+// are the glass surfaces you look at/through — fresnel sky reflection, sun
+// spec, coating hue. Layer 1 only, so the scope render camera never sees
+// them (no feedback into its own render target).
+function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: ocular,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uSunDirW: { value: SUN_DIR },
+      uReflect: { value: reflect },
+      uOcular: { value: ocular ? 1.0 : 0.0 },
+    },
+    vertexShader: /* glsl */ `
+      uniform float uOcular;
+      varying vec2 vP;
+      varying vec3 vWN;
+      varying vec3 vWP;
+      void main() {
+        vP = uv * 2.0 - 1.0;
+        // fake spherical cap: dome along the outward face (eye side for the
+        // ocular, muzzle side for the objective) so reflections roll to rim
+        float dome = uOcular > 0.5 ? 1.0 : -1.0;
+        vec3 domeN = normalize(vec3(vP.x * 0.55, vP.y * 0.55, dome));
+        vWN = normalize(mat3(modelMatrix) * domeN);
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWP = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uSunDirW;
+      uniform float uReflect;
+      uniform float uOcular;
+      varying vec2 vP;
+      varying vec3 vWN;
+      varying vec3 vWP;
+      void main() {
+        float r = clamp(length(vP), 0.0, 1.0);
+        vec3 N = normalize(vWN);
+        vec3 V = normalize(cameraPosition - vWP);
+        float ndv = abs(dot(N, V));
+        float fres = pow(1.0 - ndv, 3.5);
+        vec3 H = normalize(V + uSunDirW);
+        float spec = pow(max(dot(N, H), 0.0), 180.0);
+        // MgF2-style coating swing: magenta center → green rim
+        vec3 coat = mix(vec3(0.45, 0.18, 0.6), vec3(0.2, 0.65, 0.45), r * r);
+        vec3 skyRef = mix(vec3(0.04, 0.05, 0.07), vec3(0.62, 0.68, 0.75), fres);
+        float edgeGlow = smoothstep(0.85, 1.0, r) * 0.15;
+        if (uOcular > 0.5) {
+          // see-through: faint tint + fresnel veil + sun tick. Center stays
+          // clear so the sight picture reads through it untouched.
+          vec3 col = vec3(0.35, 0.45, 0.55) * fres * uReflect
+            + vec3(1.0, 0.95, 0.85) * spec * 1.2
+            + coat * fres * 0.12;
+          float alpha = clamp(0.03 + fres * 0.7 * uReflect + spec + edgeGlow, 0.0, 0.9);
+          gl_FragColor = vec4(col, alpha);
+        } else {
+          // front element: dark coated glass, mirrored sky + hot sun glint
+          vec3 col = vec3(0.008, 0.01, 0.013)
+            + skyRef * uReflect
+            + vec3(1.0, 0.95, 0.85) * spec * 1.6
+            + coat * fres * 0.3;
+          gl_FragColor = vec4(col, 1.0);
+        }
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+}
+
+function addGlass(
+  parent: THREE.Group,
+  radius: number,
+  z: number,
+  ocular: boolean,
+  reflect: number,
+): void {
+  const m = new THREE.Mesh(new THREE.CircleGeometry(radius, 48), makeGlassMaterial(ocular, reflect));
+  m.position.z = z;
+  m.layers.set(1);
+  if (ocular) m.renderOrder = 2;
+  parent.add(m);
+}
+
+// Sniper: ocular surface just inside the bell mouth, objective deep in the bell
+addGlass(sniperGroup, 0.054, 0.262, true, 1.0);
+addGlass(sniperGroup, 0.06, -0.298, false, 1.2);
+// ACOG: compact cups, same treatment
+addGlass(acogGroup, 0.036, 0.17, true, 1.0);
+addGlass(acogGroup, 0.042, -0.166, false, 1.2);
 
 interface ScopeConfig {
   fov: number;
@@ -1339,6 +1556,11 @@ function animate(): void {
     // (negligible parallax for the scope camera at this range).
     // (_camWorld already refreshed by the occlusion test above.)
     sunSprite.position.copy(_camWorld).addScaledVector(SUN_DIR, 700);
+
+    // Shadow frustum follows the player so 2048px stays dense nearby.
+    dirLight.position.copy(playerGroup.position).addScaledVector(SUN_DIR, 80);
+    dirLight.target.position.copy(playerGroup.position);
+    dirLight.target.updateMatrixWorld();
 
     renderer.setRenderTarget(scopeTarget);
     renderer.render(scene, scopeCamera);
