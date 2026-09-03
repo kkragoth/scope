@@ -1347,17 +1347,25 @@ const lensMat = new THREE.ShaderMaterial({
       // all the way out to meet the black tube — an inField clip left a bright
       // "space between two masks". Pixels past the stop are tube anyway (mixed
       // below), so dimming them here is harmless.
+      float eyeBoxShadow = 0.0;
       {
         float eyeMag = length(uEyeOffset);
         vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
         float slide = min(eyeMag * 1.7, 0.85);
         vec2 pupilC = nearC - eyeDir * nearR * slide;
         float bite = ellR(uv, pupilC, tiltDir, tiltCos) - nearR;
-        float penumbra = 0.22 * nearR;
-        float shade = smoothstep(0.0, penumbra, max(bite, 0.0));
+        // Edge-attached gradient: darkest where the bite is deepest (at the
+        // picture edge, against the tube), fading back to full brightness at
+        // the pupil arc. The ramp width IS the max bite depth, so the shadow
+        // always reaches full black exactly at the FOV boundary — no bright
+        // seam/ring left between the shadow and the tube.
+        float biteMax = max(nearR * slide, 0.05 * nearR);
+        float bb = clamp(max(bite, 0.0) / biteMax, 0.0, 1.0);
+        float shade = bb * bb * (3.0 - 2.0 * bb);
         // only matters once the rifle is shouldered — hip keeps its dim peephole.
         float seatGain = smoothstep(0.25, 0.8, eyeBox);
-        sceneColor *= 1.0 - shade * seatGain;
+        eyeBoxShadow = shade * seatGain;
+        sceneColor *= 1.0 - eyeBoxShadow;
       }
 
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
@@ -1373,9 +1381,12 @@ const lensMat = new THREE.ShaderMaterial({
       // keep opposite side dark for roundness
       float ringShade = pow(max(dot(ocuN, -sunN) * 0.5 + 0.5, 0.0), 2.0);
       viewWithTunnel -= vec3(0.05) * ringBand * ringShade;
-      viewWithTunnel += ringLight;
+      // the machined rim lights live just inside the FOV edge; when the eye-box
+      // shadow bites that side they must dim with it or they float as a bright
+      // ring over the darkened picture.
+      viewWithTunnel += ringLight * (1.0 - eyeBoxShadow);
       // bevel chamfer catches a duller, broader light than the rim line
-      viewWithTunnel += vec3(0.10, 0.10, 0.105) * bevel * (0.25 + 0.45 * ringGlint);
+      viewWithTunnel += vec3(0.10, 0.10, 0.105) * bevel * (0.25 + 0.45 * ringGlint) * (1.0 - eyeBoxShadow);
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
