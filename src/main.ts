@@ -866,13 +866,13 @@ const lensMat = new THREE.ShaderMaterial({
       return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
     // Radial barrel/fisheye warp around the optical axis. k < 0 barrels (the
-    // classic scope "bulge"): center magnified, rim compressed and bowed. One
-    // shared function so the image AND the etched reticle curve identically —
-    // they live on the same curved field, so a flat reticle over a warped
-    // picture is exactly the "plastered" look we avoid.
+    // classic scope "bulge"): center magnified, rim compressed and bowed. A
+    // second higher-order term (r^4) compounds the curvature like two stacked
+    // lens elements — the "double-layered" bend real scopes have. One shared
+    // function so the image AND the etched reticle curve together.
     vec2 barrelWarp(vec2 p, float k) {
       float r2 = dot(p, p);
-      return p * (1.0 + k * r2);
+      return p * (1.0 + k * r2 + k * 0.5 * r2 * r2);
     }
     // Chromatic sample at one bent coord. Transverse CA: R/B bend linearly
     // with radius (real lateral color scales ~r, not r^2) — the fringe is
@@ -1000,7 +1000,7 @@ const lensMat = new THREE.ShaderMaterial({
       // always gets an upright picture.
       vec2 imgUv = uv + imageShift;
       // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
-      float barrelK = mix(-0.14, -0.075, uAdsWeight);
+      float barrelK = mix(-0.16, -0.09, uAdsWeight);
       vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
@@ -1052,10 +1052,11 @@ const lensMat = new THREE.ShaderMaterial({
       // eye-space coords back into gun-space by -roll to draw that.
       vec2 rc = uv - reticleCenter;
       // Seat the etch IN the glass: bend it with the same ocular curvature as
-      // the image (barrelWarp + barrelK from above), so outer posts curve with
-      // the rim while the center stays put. A flat overlay is what read as
+      // the image (barrelWarp + barrelK), but a touch MORE so the etch reads
+      // as lying on its own focal plane slightly closer to the eye — the
+      // second "layer" of the double-barrel. A flat overlay is what read as
       // "plastered".
-      vec2 rcBent = barrelWarp(rc, barrelK);
+      vec2 rcBent = barrelWarp(rc, barrelK * 1.12);
       float cR = cos(uReticleRoll);
       float sR = sin(uReticleRoll);
       vec2 rcGun = vec2(cR * rcBent.x + sR * rcBent.y, -sR * rcBent.x + cR * rcBent.y);
