@@ -38,6 +38,7 @@ const skyMat = new THREE.ShaderMaterial({
   fog: false,
   uniforms: {
     uSunDir: { value: SUN_DIR },
+    uTime: { value: 0.0 },
   },
   vertexShader: /* glsl */ `
     varying vec3 vDir;
@@ -49,7 +50,20 @@ const skyMat = new THREE.ShaderMaterial({
   `,
   fragmentShader: /* glsl */ `
     uniform vec3 uSunDir;
+    uniform float uTime;
     varying vec3 vDir;
+    float skyHash(vec2 p) {
+      p = fract(p * vec2(234.34, 435.345));
+      p += dot(p, p + 34.23);
+      return fract(p.x * p.y);
+    }
+    float skyNoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(skyHash(i), skyHash(i + vec2(1.0, 0.0)), u.x),
+                 mix(skyHash(i + vec2(0.0, 1.0)), skyHash(i + vec2(1.0, 1.0)), u.x), u.y);
+    }
     void main() {
       vec3 d = normalize(vDir);
       float h = d.y;
@@ -59,6 +73,13 @@ const skyMat = new THREE.ShaderMaterial({
       vec3 col = mix(hor, zen, pow(max(h, 0.0), 0.55));
       col = mix(col, gnd, smoothstep(0.0, -0.35, h));
       float s = max(dot(d, uSunDir), 0.0);
+      // streaky clouds (planar projection, slow drift) — silver-lined near sun
+      float cl = skyNoise(vec2(d.x * 2.2, d.z * 5.5) / max(h + 0.22, 0.06)
+        + vec2(uTime * 0.004, uTime * 0.0015));
+      cl = cl * 0.65 + skyNoise(vec2(d.x * 5.0, d.z * 11.0) / max(h + 0.22, 0.06)) * 0.35;
+      float cover = smoothstep(0.52, 0.74, cl) * smoothstep(0.02, 0.18, h);
+      vec3 cloudCol = mix(vec3(0.62, 0.63, 0.65), vec3(1.06, 0.96, 0.86), pow(s, 3.0));
+      col = mix(col, cloudCol, cover * 0.7);
       // disc + tight halo + wide haze — kept minimal on purpose
       col += vec3(1.0, 0.93, 0.82) * pow(s, 1500.0) * 2.5;
       col += vec3(1.0, 0.90, 0.75) * pow(s, 160.0) * 0.28;
@@ -266,6 +287,101 @@ for (const rz of RING_Z) {
   weaponGroup.add(ring);
 }
 
+// ---- Optic assemblies: sniper rifle vs ACOG carbine ----
+// Everything built above belongs to the sniper rifle; move it under
+// sniperGroup so keys 1/2 can swap whole models, not just reticles.
+const sniperGroup = new THREE.Group();
+const acogGroup = new THREE.Group();
+weaponGroup.add(sniperGroup, acogGroup);
+for (const m of [...weaponGroup.children]) {
+  if (m !== sniperGroup && m !== acogGroup) sniperGroup.add(m);
+}
+acogGroup.visible = false;
+
+// ACOG carbine: shorter barrel + handguard, compact prism housing on a
+// single cantilever base (authentic ACOG mounting), glowing fiber strip.
+{
+  const aBarrelGeo = new THREE.CylinderGeometry(0.024, 0.02, 0.95, 32);
+  aBarrelGeo.rotateX(Math.PI / 2);
+  const aBarrel = new THREE.Mesh(aBarrelGeo, weaponMat);
+  aBarrel.position.set(0, BORE_Y, -0.55);
+  aBarrel.layers.set(1);
+  acogGroup.add(aBarrel);
+
+  const aBrakeGeo = new THREE.CylinderGeometry(0.026, 0.026, 0.08, 24);
+  aBrakeGeo.rotateX(Math.PI / 2);
+  const aBrake = new THREE.Mesh(aBrakeGeo, weaponMat);
+  aBrake.position.set(0, BORE_Y, -1.05);
+  aBrake.layers.set(1);
+  acogGroup.add(aBrake);
+
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.45), weaponMat);
+  guard.position.set(0, -0.15, -0.32);
+  guard.layers.set(1);
+  acogGroup.add(guard);
+
+  const aRecv = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.16, 0.6), weaponMat);
+  aRecv.position.set(0, -0.225, 0.2);
+  aRecv.layers.set(1);
+  acogGroup.add(aRecv);
+
+  const aRail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.015, 0.4), weaponMat);
+  aRail.position.set(0, -0.1375, 0.05);
+  aRail.layers.set(1);
+  acogGroup.add(aRail);
+
+  const aMag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.09, 0.12), weaponMat);
+  aMag.position.set(0, -0.34, 0.15);
+  aMag.layers.set(1);
+  acogGroup.add(aMag);
+
+  const aTrig = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.035, 0.014), weaponMat);
+  aTrig.position.set(0, -0.315, 0.32);
+  aTrig.layers.set(1);
+  acogGroup.add(aTrig);
+
+  // Prism housing + ocular/objective cups (optic axis stays y = 0 so ADS
+  // stays centered for both rifles)
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(0.062, 0.075, 0.24), weaponMat);
+  housing.position.set(0, 0, 0);
+  housing.layers.set(1);
+  acogGroup.add(housing);
+
+  const aOcuGeo = new THREE.CylinderGeometry(0.038, 0.034, 0.06, 32, 1, true);
+  aOcuGeo.rotateX(Math.PI / 2);
+  const aOcu = new THREE.Mesh(aOcuGeo, weaponMat);
+  aOcu.position.set(0, 0, 0.14);
+  aOcu.layers.set(1);
+  acogGroup.add(aOcu);
+
+  const aObjGeo = new THREE.CylinderGeometry(0.036, 0.044, 0.06, 32, 1, true);
+  aObjGeo.rotateX(Math.PI / 2);
+  const aObj = new THREE.Mesh(aObjGeo, weaponMat);
+  aObj.position.set(0, 0, -0.14);
+  aObj.layers.set(1);
+  acogGroup.add(aObj);
+
+  // Single cantilever mount base (ACOGs don't use two rings)
+  const aBase = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.0925, 0.18), weaponMat);
+  aBase.position.set(0, -0.08375, 0);
+  aBase.layers.set(1);
+  acogGroup.add(aBase);
+
+  // Fiber-optic light collector strip (signature ACOG glow)
+  const fiberMat = new THREE.MeshStandardMaterial({
+    color: 0x330000,
+    emissive: 0xff2211,
+    emissiveIntensity: 1.4,
+    roughness: 0.3,
+  });
+  const fiberGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.1, 12);
+  fiberGeo.rotateX(Math.PI / 2);
+  const fiber = new THREE.Mesh(fiberGeo, fiberMat);
+  fiber.position.set(0, 0.046, 0.02);
+  fiber.layers.set(1);
+  acogGroup.add(fiber);
+}
+
 const scopeTarget = new THREE.WebGLRenderTarget(1024, 1024, {
   format: THREE.RGBAFormat,
 });
@@ -279,7 +395,7 @@ const lensGeo = new THREE.CircleGeometry(tubeRadius - 0.0005, 64);
 const lensMat = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: scopeTarget.texture },
-    uAberration: { value: 0.018 },
+    uAberration: { value: 0.03 },
     uVignetteSize: { value: 0.485 },
     uShadowHardness: { value: 0.06 },
     uParallaxSens: { value: 4.5 },
@@ -294,6 +410,7 @@ const lensMat = new THREE.ShaderMaterial({
     uGlassTint: { value: new THREE.Color(1.0, 1.0, 1.0) },
     uOpticMode: { value: 0.0 },
     uSunFacing: { value: 0.0 },
+    uReticleScale: { value: 1.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -319,6 +436,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform vec3 uGlassTint;
     uniform float uOpticMode;
     uniform float uSunFacing;
+    uniform float uReticleScale;
     varying vec2 vUv;
 
     float hash21(vec2 p) {
@@ -373,12 +491,12 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 imageCenter = -uEyeOffset * 1.0;
 
       // Edge-only chromatic aberration: zero in center, ramps to rim.
-      // caMask stays 0 until ~1/4 radius, then rises quadratically, and the
+      // caMask stays 0 until very close in, then rises quadratically, and the
       // resulting R/B split is a multiple of ir2 — so the rim (ir2 ~ 0.24)
-      // gets a clearly visible ~4px fringe while the center stays clean.
-      float caMask = smoothstep(0.08, 0.44, distFromCenter);
+      // gets a bold ~7px fringe while the center stays perfectly clean.
+      float caMask = smoothstep(0.05, 0.4, distFromCenter);
       caMask *= caMask;
-      float dynamicAberration = (uAberration + swayDist * 1.2) * caMask;
+      float dynamicAberration = (uAberration + swayDist * 1.5) * caMask;
 
       float currentDistortion = mix(0.7, 0.05, uAdsWeight);
 
@@ -400,7 +518,9 @@ const lensMat = new THREE.ShaderMaterial({
       float g = texture2D(tDiffuse, sampG + 0.5).g;
       float b = texture2D(tDiffuse, sampB + 0.5).b;
       vec3 sceneColor = vec3(r, g, b);
-      sceneColor *= uGlassTint;
+      // Sight picture runs slightly darker than naked eye (coated glass
+      // transmission loss) — the rim falloff later deepens this to the edge.
+      sceneColor *= 0.9 * uGlassTint;
 
       // ---- LENS SMUDGE & DIRT: ultra-subtle, glint-only ----
       // uDirtOpacity ~0.05 by default: effectively invisible unless sun catches it.
@@ -435,7 +555,10 @@ const lensMat = new THREE.ShaderMaterial({
       // forward along the barrel, so upright sampling here is correct. At hip
       // you see the ocular at an angle — perspective foreshortening handles
       // that, no texture flip needed. Do not "fix" by flipping vUv.
-      vec2 p = uv - reticleCenter;
+      // FFP vs SFP: sniper reticle scales with magnification (first focal
+      // plane — subtensions stay true at any zoom), ACOG stays fixed size
+      // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
+      vec2 p = (uv - reticleCenter) / uReticleScale;
       bool isAcog = uOpticMode > 0.5;
 
       // SNIPER etch: full thin mil cross + thick outer posts + mil dots
@@ -486,9 +609,21 @@ const lensMat = new THREE.ShaderMaterial({
       // illuminated chevron sits on top of etch
       sceneColor += uReticleColor * illumMask * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
-      // battery bleed: faint colored wash on surrounding glass (kept tiny so
-      // it never lifts/washes the sight picture)
-      sceneColor += uReticleColor * (halo * 0.12 + 0.004) * uBattery * reticleVis;
+      // battery bleed: tight faint wash that never blooms with glowStrength
+      // (decoupling it is what keeps the sight picture from lifting)
+      float wash = (exp(-haloDist * 140.0) * 0.30 + 0.002) * (0.5 + darkFactor * 0.8) * uBattery;
+      sceneColor += uReticleColor * wash * reticleVis;
+
+      // ---- GLASS GRIT: dust motes + one fiber, fixed to the ocular surface
+      // (vUv space — they ride with the tube, never with the world image)
+      {
+        float m1 = 1.0 - smoothstep(0.0, 0.0022, length(vUv - vec2(0.44, 0.57)));
+        float m2 = 1.0 - smoothstep(0.0, 0.0016, length(vUv - vec2(0.58, 0.44)));
+        float m3 = 1.0 - smoothstep(0.0, 0.0012, length(vUv - vec2(0.52, 0.62)));
+        float fib = 1.0 - smoothstep(0.0, 0.0009, sdSegment(vUv, vec2(0.30, 0.70), vec2(0.42, 0.62)));
+        float grit = clamp(m1 + m2 + m3, 0.0, 1.0) * 0.45 + fib * 0.35;
+        sceneColor = mix(sceneColor, vec3(0.0), grit * inImage);
+      }
 
       // ---- VEILING GLARE: sun washes the IMAGE, not the tube ----
       // Real optics bloom the picture when aimed near the sun; the baffled
@@ -516,6 +651,19 @@ const lensMat = new THREE.ShaderMaterial({
 
       float objectiveMask = smoothstep(currentAperture - uShadowHardness, currentAperture, distImg);
 
+      // Directional eye-box shadow: blackout creeps in from the side the eye
+      // drifts toward (not a uniform radial close). Scales with eye error so
+      // a centered eye sees a clean full picture.
+      {
+        float eyeMag = length(uEyeOffset);
+        vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
+        float sideProj = dot(uv - tubeCenter, eyeDir);
+        float crescentEdge = currentAperture * (1.0 - eyeMag * 2.4);
+        float eyeShadow = smoothstep(crescentEdge - uShadowHardness, crescentEdge, sideProj)
+          * smoothstep(0.02, 0.12, eyeMag);
+        objectiveMask = max(objectiveMask, eyeShadow);
+      }
+
       // Tube interior is matte black (baffled — it never catches direct sun).
       // Only a faint warm kiss on the outer wall band, scaled by sunFacing so
       // it dies completely when looking away from the sun.
@@ -534,6 +682,20 @@ const lensMat = new THREE.ShaderMaterial({
       float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.35;
       tubeWall += vec3(0.09, 0.09, 0.09) * innerRefl * objectiveMask;
 
+      // Machined baffle ridges: concentric rings darken the wall in bands and
+      // catch a hairline highlight on the sun side at glancing angles.
+      float baffles = 0.5 + 0.5 * sin(distTube * 240.0);
+      tubeWall *= (0.82 + 0.18 * baffles);
+      tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask;
+
+      // Lens-coating sheen (MgF2-style): faint magenta/green shift that only
+      // exists near the rim and swings hue with the sun side. Dies head-on.
+      {
+        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.16;
+        vec3 coat = mix(vec3(1.0, 0.35, 0.9), vec3(0.35, 1.0, 0.55), 0.5 + 0.5 * dot(tubeN, sunN));
+        sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
+      }
+
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
 
       // ocular rim: hard clip + one minimal thin sun-line on the very edge
@@ -549,10 +711,10 @@ const lensMat = new THREE.ShaderMaterial({
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
-      // Sight-picture brightness: center ~neutral, only a whisper of falloff
-      // on the outside of the circle toward the rim. Never lift the image.
+      // Sight-picture brightness: neutral-to-dim center, real falloff on the
+      // outside of the circle toward the rim. Never lift the image.
       float brightT = smoothstep(0.0, uVignetteSize, length(uv - imageCenter));
-      finalColor *= mix(1.01, 0.95, brightT);
+      finalColor *= mix(1.0, 0.85, brightT);
 
       // faint grain for tactical grit (not in the black tunnel)
       float grain = hash21(vUv * 913.0 + fract(uTime) * 7.0) - 0.5;
@@ -568,7 +730,14 @@ const lensMat = new THREE.ShaderMaterial({
 const lens = new THREE.Mesh(lensGeo, lensMat);
 lens.position.z = tubeLength / 2 - 0.005;
 lens.layers.set(1);
-weaponGroup.add(lens);
+sniperGroup.add(lens);
+
+// ACOG ocular display (shares lensMat; hidden group never renders)
+const aLensGeo = new THREE.CircleGeometry(0.0355, 48);
+const aLens = new THREE.Mesh(aLensGeo, lensMat);
+aLens.position.z = 0.168;
+aLens.layers.set(1);
+acogGroup.add(aLens);
 
 interface ScopeConfig {
   fov: number;
@@ -641,6 +810,8 @@ function isMoveKey(key: string): key is MoveKey {
 // Reticle illumination state (C toggles red/green, B toggles battery)
 // Optic state (1 = sniper scope, 2 = ACOG / red dot)
 let reticleIsGreen = false;
+// FFP scaling (sniper reticle grows with zoom) — off by default, F toggles
+let ffpEnabled = false;
 const RETICLE_RED = new THREE.Color(1.0, 0.16, 0.05);
 const RETICLE_GREEN = new THREE.Color(0.25, 1.0, 0.35);
 const SNIPER_FOV = 3.0;
@@ -648,8 +819,13 @@ const ACOG_FOV = 9.0;
 
 function setOpticMode(acog: boolean): void {
   lensMat.uniforms.uOpticMode.value = acog ? 1.0 : 0.0;
+  // Swap whole rifle models, not just reticles
+  sniperGroup.visible = !acog;
+  acogGroup.visible = acog;
   config.fov = acog ? ACOG_FOV : SNIPER_FOV;
   scopeCamera.fov = config.fov;
+  // Objective station differs per housing (sniper bell vs ACOG cup)
+  scopeCamera.position.z = acog ? -0.14 : -(tubeLength / 2);
   scopeCamera.updateProjectionMatrix();
 }
 
@@ -667,6 +843,9 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (k === 'b') {
     const cur = lensMat.uniforms.uBattery.value as number;
     lensMat.uniforms.uBattery.value = cur > 0.5 ? 0.0 : 1.0;
+  }
+  if (k === 'f') {
+    ffpEnabled = !ffpEnabled;
   }
 });
 document.addEventListener('keyup', (e: KeyboardEvent) => {
@@ -745,6 +924,14 @@ function animate(): void {
       mouseVelocityY,
     );
     lensMat.uniforms.uTime.value = time;
+    skyMat.uniforms.uTime.value = time;
+    // FFP sniper reticle follows magnification, ACOG stays fixed (SFP).
+    // FFP is opt-in via F (off by default); ACOG ignores it entirely.
+    const isAcogNow = (lensMat.uniforms.uOpticMode.value as number) > 0.5;
+    lensMat.uniforms.uReticleScale.value =
+      !isAcogNow && ffpEnabled
+        ? THREE.MathUtils.clamp(SNIPER_FOV / config.fov, 0.35, 2.2)
+        : 1.0;
 
     // ---- SUN / GLINT: project global directional light into scope view ----
     scopeCamera.getWorldDirection(_scopeFwd);
