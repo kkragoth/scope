@@ -1511,7 +1511,7 @@ weaponGroup.position.copy(hipPosition);
 // tube axis — a bare sideways shift would read as eye error and the eye-box
 // shadow would swallow the sight picture.
 let rightEye = true;
-const ADS_X_RIGHT = 0.05;
+const ADS_X_RIGHT = 0.065;
 
 let currentAdsWeight = 0.0;
 let mouseVelocityX = 0;
