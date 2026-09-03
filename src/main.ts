@@ -1153,16 +1153,20 @@ const lensMat = new THREE.ShaderMaterial({
 
       // Directional eye-box shadow: blackout creeps in from the side the eye
       // drifts toward (not a uniform radial close). Scales with eye error so
-      // a centered eye sees a clean full picture. Evaluated in the same
-      // elliptical metric as the aperture so the crescent follows the tilt.
+      // a centered eye sees a clean full picture. The blackout edge is the
+      // arc of the eye's entrance pupil sliding against the field stop — a
+      // lune/crescent (elliptical under tube tilt), NOT a straight cutoff.
       {
         float eyeMag = length(uEyeOffset);
         vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
-        float sideProj = dot(uv - tubeCenter, eyeDir);
-        float crescentEdge = currentAperture * (1.0 - eyeMag * 2.8);
-        float eyeShadow = smoothstep(crescentEdge - shadowK, crescentEdge, sideProj)
-          * smoothstep(0.015, 0.10, eyeMag);
-        objectiveMask = max(objectiveMask, eyeShadow);
+        // eye pupil is a disc that travels with the eye; the picture shows
+        // only where it overlaps the objective field stop. Off-axis the two
+        // discs part into a crescent.
+        float slide = min(eyeMag * 2.2, 1.0);
+        vec2 pupilC = imageCenter - eyeDir * currentAperture * slide;
+        float pupilR = currentAperture * 1.04;
+        float pupilMask = smoothstep(pupilR - shadowK, pupilR, ellR(uv, pupilC, tiltDir, tiltCos));
+        objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.02, 0.14, eyeMag));
       }
 
       // Tube interior is matte black (baffled — it never catches direct sun).
