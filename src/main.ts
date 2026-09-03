@@ -1647,8 +1647,6 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (k === 't') {
     dofRings = !dofRings;
     lensMat.uniforms.uDofRings.value = dofRings ? 1.0 : 0.0;
-    (document.getElementById('dofstate') as HTMLParagraphElement).textContent =
-      `Glass DOF: ${dofRings ? 'ON' : 'OFF'} — T to toggle`;
   }
   if (k === 'k') {
     rightEye = !rightEye;
@@ -1662,7 +1660,10 @@ document.addEventListener('keyup', (e: KeyboardEvent) => {
   const k = e.key.toLowerCase();
   if (isMoveKey(k)) keys[k] = false;
   if (isLeanKey(k)) leanKeys[k] = false;
-  if (k === 'shift') breathHeld = false;
+  if (k === 'shift') {
+    if (breathHeld) gaspT = 0.6; // release shudder: the chest gasps back
+    breathHeld = false;
+  }
 });
 
 const ammoEl = document.getElementById('ammo') as HTMLParagraphElement;
@@ -1761,6 +1762,27 @@ let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
 let holdBlend = 0.0;
+// FREE-FLOAT SWAY state — the rifle is never glued to the screen. Two layers:
+// common-mode (head+gun together: aim wanders over the world, lens stays
+// clear) plus differential (gun floats against the head: the scope drifts on
+// screen with a whisper of eye-box shadow). Summed incommensurate sines + a
+// retargeting random walk so the hold never repeats. Amplitudes in radians.
+let headYaw = 0;
+let headPitch = 0;
+let exertion = 0; // 0 rested … ~1.5 exerted; rises fast, decays slow (~4s)
+let flickSm = 0; // smoothed mouse speed (drives exertion)
+let gaspT = 0; // post-hold release shudder timer
+let wanderTX = 0;
+let wanderTY = 0;
+let wanderCX = 0;
+let wanderCY = 0;
+let wanderTimer = 0;
+let heartPh = 0; // heartbeat phase (rate drifts with exertion/hold)
+const seedA = Math.random() * Math.PI * 2;
+const seedB = Math.random() * Math.PI * 2;
+const seedC = Math.random() * Math.PI * 2;
+const seedD = Math.random() * Math.PI * 2;
+const TAU = Math.PI * 2;
 // FIRING state: 5-round mag, bolt-action gap, bolt-throw reload. Recoil goes
 // straight into the weapon springs (wVel/wRotVel) so the gun answers with
 // mass; brass is a fixed pool (zero per-frame allocs); flash is one sprite
@@ -1847,10 +1869,10 @@ function animate(): void {
     camera.updateProjectionMatrix();
 
     // LAYER 1 — head eases toward look intent (mass, ~30/s, no teleport).
-    playerGroup.rotation.y +=
-      (yawTarget - playerGroup.rotation.y) * Math.min(1, 30 * delta);
-    pitchObject.rotation.x +=
-      (pitchTarget - pitchObject.rotation.x) * Math.min(1, 30 * delta);
+    // Eased into headYaw/headPitch; the free-float sway below overlays at
+    // assignment time so it never corrupts look intent (mouse stays 1:1).
+    headYaw += (yawTarget - headYaw) * Math.min(1, 30 * delta);
+    headPitch += (pitchTarget - headPitch) * Math.min(1, 30 * delta);
 
     // WHOLE-WEAPON TARGETS: anchor follows intent; sway offsets ride along.
     const targetWeight = isAiming ? 1.0 : 0.0;
@@ -1908,6 +1930,85 @@ function animate(): void {
     const stepRY = Math.cos(walkPh * 0.5) * (strideAmp * 0.6);
     const stepRR = Math.sin(walkPh * 1.3) * (strideAmp * 0.45);
 
+    // ---- FREE-FLOAT SWAY: the rifle is never glued to the screen ----
+    // Exertion rises fast (walking / flicking), decays slow (~4s).
+    const instFlick = Math.hypot(moveImpX, moveImpY) / Math.max(delta, 1e-3) * 0.001;
+    flickSm += (instFlick - flickSm) * Math.min(1, 10 * delta);
+    const exTarget = Math.min(moveBlend * 0.8 + flickSm * 5.0, 1.5);
+    exertion += (exTarget - exertion) * Math.min(1, (exTarget > exertion ? 2.0 : 0.35) * delta);
+    gaspT = Math.max(0, gaspT - delta);
+    // Heavy sniper breathes slow and deep; the light carbine is snappier but
+    // trembles more.
+    const lowK = acogActive ? 0.8 : 1.15;
+    const tremorK = acogActive ? 1.25 : 0.7;
+    const swayAmp = (isAiming ? 1.0 : 2.0) * (1.0 + exertion * 0.7);
+    // Shift gates nearly everything: a real hold leaves ~15% residual and a
+    // slowed, faded pulse — the sight picture goes still.
+    const steadyK = 1.0 - holdBlend * 0.85;
+    const swayGate = swayAmp * steadyK;
+    // Random-walk aim wander: retargets ~1/s, cruises there slowly. This is
+    // the "can't hold perfectly still" — the crosshair roams the target.
+    wanderTimer -= delta;
+    if (wanderTimer <= 0) {
+      wanderTimer = 0.7 + Math.random() * 0.9;
+      const wA = 0.0022 * swayGate * lowK;
+      wanderTX = (Math.random() * 2 - 1) * wA;
+      wanderTY = (Math.random() * 2 - 1) * wA * 0.7;
+    }
+    const cruiseK = Math.min(1, (acogActive ? 3.0 : 2.2) * delta);
+    wanderCX += (wanderTX - wanderCX) * cruiseK;
+    wanderCY += (wanderTY - wanderCY) * cruiseK;
+    // Breathing: ~13/min fundamental + 2nd harmonic (exhale longer than
+    // inhale), incommensurate yaw/roll copies so it never loops cleanly.
+    const brPh = time * TAU * 0.22 + seedA;
+    const brA = breathFactor * swayGate * lowK;
+    const brP = Math.sin(brPh) * 0.003 + Math.sin(brPh * 2 + 1.1) * 0.0008;
+    const brY = Math.sin(brPh * 0.5 + 0.7 + seedB) * 0.0018;
+    const brR = Math.sin(brPh * 0.5 + 2.0 + seedC) * 0.001;
+    // Heartbeat: sharp systolic thump. Controlled breathing (Shift) slows it
+    // down and fades it — the hold goes quiet instead of pounding.
+    heartPh += delta * (1.1 + exertion * 0.5) * (1.0 - holdBlend * 0.35);
+    const hbThump = Math.pow(Math.max(Math.sin(heartPh * TAU), 0), 8);
+    const hbAmp = 0.0012 * (0.4 + exertion * 1.2) * (1.0 - holdBlend * 0.6);
+    // Physiological tremor, 8–13 Hz — sub-pixel at rest, grows with exertion.
+    const tremorA = (0.25 + exertion) * tremorK * (0.2 + 0.8 * steadyK);
+    const trX =
+      (Math.sin(time * TAU * 9.3 + seedB) * 0.0006 +
+        Math.sin(time * TAU * 12.7 + seedD) * 0.0004) * tremorA;
+    const trY =
+      (Math.sin(time * TAU * 8.1 + seedC) * 0.0006 +
+        Math.sin(time * TAU * 11.3 + seedA) * 0.0004) * tremorA;
+    // Gasp shudder after releasing Shift.
+    const gaspW = Math.sin(time * 57.0) * ((gaspT / 0.6) * 0.004);
+    // COMMON-MODE (head + gun together): aim wanders over the world, the eye
+    // geometry is untouched so the lens stays clear.
+    const swayYaw = wanderCX + brY * brA + trY * 0.5;
+    const swayPitch = wanderCY + brP * brA + hbThump * hbAmp + trX * 0.5 + gaspW;
+    const swayRoll = brR * brA + hbThump * hbAmp * 0.4;
+    playerGroup.rotation.y = headYaw + swayYaw;
+    pitchObject.rotation.x = headPitch + swayPitch;
+    // DIFFERENTIAL (gun floats against the head): a phase-lagged chest copy
+    // so the rifle trails the torso, plus slow positional float and tremor.
+    // Peak ~4 mrad + ~4 mm — the scope visibly breathes on screen while the
+    // eye stays deep inside the eye box (whisper of crescent at extremes).
+    const lagPh = brPh - 0.7;
+    const diffYaw =
+      Math.sin(lagPh * 0.5 + 0.7 + seedB) * 0.0012 * brA +
+      (Math.sin(time * 0.9 + seedC) * 0.0012 + Math.sin(time * 1.7 + seedD) * 0.0007) * swayGate +
+      trY;
+    const diffPitch =
+      (Math.sin(lagPh) * 0.0015 + Math.sin(lagPh * 2 + 1.1) * 0.0006) * brA +
+      (Math.sin(time * 1.1 + seedA + 2.0) * 0.0012 + Math.sin(time * 1.9 + seedB) * 0.0007) * swayGate +
+      trX +
+      gaspW * 0.7;
+    const diffRoll = Math.sin(time * 0.8 + seedD) * 0.0008 * swayGate + trX * 0.5;
+    // Positional float, meters: the muzzle end wanders while the cheek weld
+    // holds. Doubled at hip where nobody is looking through glass.
+    const hipK = isAiming ? 1 : 2;
+    const floatX = (Math.sin(time * 0.7 + seedA) * 0.0025 + Math.sin(time * 1.3 + seedB) * 0.0012) * hipK * steadyK;
+    const floatY =
+      (Math.sin(time * 0.9 + seedC + 1.0) * 0.0022 + Math.sin(time * 1.6 + seedD) * 0.001) * hipK * steadyK;
+
     // CHEEK WELD: the eye rides the gun. Tracking a turn shouldered keeps
     // alignment — error is a brief transient on jerks, never a standing
     // offset while turning. So: fast stiff spring (~22/s) + tight clamp.
@@ -1946,7 +2047,7 @@ function animate(): void {
       headLean += (leanTarget - headLean) * Math.min(1, 8 * delta);
       const manualTarget = (leanKeys.q ? 1 : 0) - (leanKeys.e ? 1 : 0);
       manualLean += (manualTarget - manualLean) * Math.min(1, 10 * delta);
-      pitchObject.rotation.z = headLean + manualLean * 0.10;
+      pitchObject.rotation.z = headLean + manualLean * 0.10 + swayRoll;
       pitchObject.position.x = -manualLean * 0.08;
       pitchObject.position.y = -Math.abs(manualLean) * 0.02;
     }
@@ -1972,9 +2073,9 @@ function animate(): void {
       // on quick movements — that relative rotation is what pushes the eye off
       // axis and opens the eye-box crescent. Breathing + stride keep the slow
       // physical sway; recoil still punches in.
-      const tRX = -mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch;
-      const tRY = baseRotY - mouseVelocityX * 0.9 + breathRX + stepRY;
-      const tRZ = baseRotZ - mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll;
+      const tRX = -mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch + diffPitch;
+      const tRY = baseRotY - mouseVelocityX * 0.9 + breathRX + stepRY + diffYaw;
+      const tRZ = baseRotZ - mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll + diffRoll;
       const KR = 128;
       const CR = 17.0;
       const KP = 88;
@@ -1986,8 +2087,8 @@ function animate(): void {
       wRot.y += wRotVel.y * delta;
       wRot.z += wRotVel.z * delta;
       weaponGroup.rotation.set(wRot.x, wRot.y, wRot.z);
-      wVel.x += ((_anchor.x + bobX + driftX - wPos.x) * KP - wVel.x * CP) * delta;
-      wVel.y += ((_anchor.y + bobY + driftY - wPos.y) * KP - wVel.y * CP) * delta;
+      wVel.x += ((_anchor.x + bobX + driftX + floatX - wPos.x) * KP - wVel.x * CP) * delta;
+      wVel.y += ((_anchor.y + bobY + driftY + floatY - wPos.y) * KP - wVel.y * CP) * delta;
       wVel.z += ((_anchor.z + bobZ + shoulderZ - wPos.z) * KP - wVel.z * CP) * delta;
       wPos.x += wVel.x * delta;
       wPos.y += wVel.y * delta;
