@@ -797,6 +797,7 @@ const lensMat = new THREE.ShaderMaterial({
     uEyeOffset: { value: new THREE.Vector2(0, 0) },
     uEyeRelief: { value: 1.0 },
     uZoomK: { value: 1.0 },
+    uSwaySpeed: { value: 0.0 },
     uReticleRoll: { value: 0.0 },
     uViewAngle: { value: new THREE.Vector2(0, 0) },
     uAdsWeight: { value: 0.0 },
@@ -804,7 +805,7 @@ const lensMat = new THREE.ShaderMaterial({
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
     uSunIntensity: { value: 0.35 },
     uReticleColor: { value: new THREE.Color(1.0, 0.16, 0.05) },
-    uBattery: { value: 1.0 },
+    uBattery: { value: 0.0 },
     uDirtOpacity: { value: 0.05 },
     uGlassTint: { value: new THREE.Color(1.0, 1.0, 1.0) },
     uOpticMode: { value: 0.0 },
@@ -829,6 +830,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform vec2 uEyeOffset;
     uniform float uEyeRelief;
     uniform float uZoomK;
+    uniform float uSwaySpeed;
     uniform float uReticleRoll;
     uniform vec2 uViewAngle;
     uniform float uAdsWeight;
@@ -943,7 +945,7 @@ const lensMat = new THREE.ShaderMaterial({
       // the barrel), so any internal lateral slide is only the *parallax*
       // whisper — the sway is FELT through the whole sight (picture + reticle
       // slide together off-axis, so the crosshair never sits glued to centre).
-      vec2 rawSight = -uEyeOffset * 0.6;
+      vec2 rawSight = -uEyeOffset * 0.78;
       float maxSight = uVignetteSize * 0.8;
       vec2 sightC = length(rawSight) > maxSight ? normalize(rawSight) * maxSight : rawSight;
       vec2 imageShift = -sightC;
@@ -988,6 +990,14 @@ const lensMat = new THREE.ShaderMaterial({
       // lives in the *error response* (uEyeOffset/uEyeRelief are amplified by
       // zoomTighten in JS), so it only bites when you sway, never when centered.
       float currentAperture = min(exitR, uVignetteSize) * mix(0.35, 1.0, eyeBox);
+      // Eye-relief exaggeration (off-axis at high magnification): a magnified
+      // scope has a tiny exit pupil, so a FAST lateral swing clips a much
+      // bigger share of the field — the picture collapses toward a smaller,
+      // drifted circle floating in the dark of the eyepiece. Gated by uSwaySpeed
+      // so slow, deliberate mouse corrections stay full-size (easy to aim);
+      // only quick swings actually lose the eye box.
+      float eyeSwing = uSwaySpeed * swayDist * (0.6 + (uZoomK - 1.0) * 0.28);
+      currentAperture *= 1.0 - clamp(eyeBox * eyeSwing, 0.0, 0.55);
       float shadowK = uShadowHardness * mix(1.7, 0.75, clamp(2.0 - uEyeRelief, 0.0, 1.0));
       // zoomed glass punishes harder: edge hardens with magnification
       shadowK *= 1.0 + (uZoomK - 1.0) * 0.25;
@@ -1528,6 +1538,11 @@ let isAiming = false;
 let eyeBoxMode = 1;
 let prevAiming = false;
 const EYEBOX_NAMES = ['', 'CLEAN', 'SOFT', 'STICKY'] as const;
+// Zoom blackening response (Z): SWAY-ONLY suppresses the eye-box error while the
+// rifle sits still (more so when zoomed) so resting never blackens the view at
+// high magnification — the blackening only really bites when you are actually
+// swaying, where the full zoom amplification still applies.
+let zoomSwayOnly = true;
 
 const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
@@ -1626,8 +1641,13 @@ function isLeanKey(key: string): key is LeanKey {
 }
 
 // Reticle illumination state (C toggles red/green, B toggles battery)
-// Optic state (1 = sniper scope, 2 = ACOG / red dot)
+// Battery is PER OPTIC: the sniper chevron ships unlit (etched-only, classic
+// unpowered mil reticle) while the ACOG red dot ships lit.
 let reticleIsGreen = false;
+const batteryOn: { sniper: number; acog: number } = { sniper: 0, acog: 1 };
+function applyBattery(): void {
+  lensMat.uniforms.uBattery.value = batteryOn[acogActive ? 'acog' : 'sniper'];
+}
 // FFP scaling (sniper reticle grows with zoom) — off by default, F toggles
 let ffpEnabled = false;
 const RETICLE_RED = new THREE.Color(1.0, 0.16, 0.05);
@@ -1641,6 +1661,7 @@ function setOpticMode(acog: boolean): void {
   sniperGroup.visible = !acog;
   acogGroup.visible = acog;
   acogActive = acog;
+  applyBattery();
   config.fov = acog ? ACOG_FOV : SNIPER_FOV;
   scopeCamera.fov = config.fov;
   // Objective station differs per housing (sniper bell vs ACOG cup)
@@ -1662,8 +1683,9 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     );
   }
   if (k === 'b') {
-    const cur = lensMat.uniforms.uBattery.value as number;
-    lensMat.uniforms.uBattery.value = cur > 0.5 ? 0.0 : 1.0;
+    const key = acogActive ? 'acog' : 'sniper';
+    batteryOn[key] = batteryOn[key] > 0.5 ? 0 : 1;
+    applyBattery();
   }
   if (k === 'f') {
     ffpEnabled = !ffpEnabled;
@@ -1685,6 +1707,11 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     eyeBoxMode = (eyeBoxMode % 3) + 1;
     (document.getElementById('boxstate') as HTMLParagraphElement).textContent =
       `Eye-box hold: ${EYEBOX_NAMES[eyeBoxMode]} — G cycles`;
+  }
+  if (k === 'z') {
+    zoomSwayOnly = !zoomSwayOnly;
+    (document.getElementById('zoomstate') as HTMLParagraphElement).textContent =
+      `Zoom blacken: ${zoomSwayOnly ? 'SWAY-ONLY (rest mild)' : 'FULL (rest blackens)'} — Z toggles`;
   }
   if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
@@ -1791,6 +1818,10 @@ const _viewAngle = new THREE.Vector2();
 const _eyeSm = new THREE.Vector2(0, 0);
 const _viewSm = new THREE.Vector2(0, 0);
 let _reliefSm = 1.0;
+// EYE-BOX SWING SPEED (0..1): how fast the rifle is currently being swung.
+// Slow deliberate corrections stay ≈ 0 (no eye-box exaggeration); quick flicks
+// go to ~1 and linger a beat while the eye re-seats.
+let _swaySpeed = 0.0;
 let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
@@ -1967,9 +1998,43 @@ function animate(): void {
     // Exertion rises fast (walking / flicking), decays slow (~4s).
     const instFlick = Math.hypot(moveImpX, moveImpY) / Math.max(delta, 1e-3) * 0.001;
     flickSm += (instFlick - flickSm) * Math.min(1, 10 * delta);
+    // Eye-box exaggeration only for FAST swings: flickSm ≈ mouse px/s * 1e-3,
+    // so shape it with a threshold — gentle corrective moves stay ≈ 0 and a
+    // quick flick/pan slams to ~1 (then lingers while the eye re-seats).
+    {
+      const spdT = THREE.MathUtils.smoothstep(flickSm, 0.25, 0.85);
+      _swaySpeed += (spdT - _swaySpeed) *
+        Math.min(1, (spdT > _swaySpeed ? 14 : 4) * delta);
+    }
+    lensMat.uniforms.uSwaySpeed.value = _swaySpeed;
     const exTarget = Math.min(moveBlend * 0.8 + flickSm * 5.0, 1.5);
     exertion += (exTarget - exertion) * Math.min(1, (exTarget > exertion ? 2.0 : 0.35) * delta);
     gaspT = Math.max(0, gaspT - delta);
+    // Sway activity + zoom response (Z / SWAY-ONLY): swayAct feeds the eye-box
+    // suppression below; stillZoom (and the damp above) shape how zoom scales
+    // the free-float wobble. swayAct ≈ 0 when the rifle sits still, ~1 when it
+    // is actually being swung/flicked.
+    const zoomTw = THREE.MathUtils.clamp(
+      Math.pow((acogActive ? ACOG_FOV : SNIPER_FOV) / config.fov, 2.0),
+      0.25,
+      6.0,
+    );
+    const swayAct = THREE.MathUtils.clamp(
+      Math.hypot(mouseVelocityX, mouseVelocityY) * 40.0 +
+        moveBlend * 0.6 +
+        flickSm * 8.0,
+      0.0,
+      1.0,
+    );
+    const stillZoom = THREE.MathUtils.smoothstep(zoomTw, 1.6, 5.0);
+    // Zoomed aim wobble is DAMPED, not amplified: the magnified view already
+    // enlarges any angular sway, so pushing it up makes the whole screen shake
+    // apart. Cut it roughly in half once you're well zoomed and shouldered.
+    const zoomSwayDamp = THREE.MathUtils.lerp(
+      1.0,
+      0.5,
+      currentAdsWeight * stillZoom,
+    );
     // Heavy sniper breathes slow and deep; the light carbine is snappier but
     // trembles more.
     const lowK = acogActive ? 0.8 : 1.15;
@@ -2018,8 +2083,8 @@ function animate(): void {
     const swayYaw = wanderCX + brY * brA + trY * 0.5;
     const swayPitch = wanderCY + brP * brA + hbThump * hbAmp + trX * 0.5 + gaspW;
     const swayRoll = brR * brA + hbThump * hbAmp * 0.4;
-    playerGroup.rotation.y = headYaw + swayYaw;
-    pitchObject.rotation.x = headPitch + swayPitch;
+    playerGroup.rotation.y = headYaw + swayYaw * zoomSwayDamp;
+    pitchObject.rotation.x = headPitch + swayPitch * zoomSwayDamp;
     // DIFFERENTIAL (gun floats against the head): a phase-lagged chest copy
     // so the rifle trails the torso, plus slow positional float and tremor.
     // Peak ~4 mrad + ~4 mm — the scope visibly breathes on screen while the
@@ -2190,6 +2255,24 @@ function animate(): void {
       const softY = Math.tanh(rawY * 0.9) * distGain * zoomTighten;
       const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
       const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
+      // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
+      // amplified, so the only knob needed is how much of that error "counts".
+      // When the rifle is sitting still we suppress it (harder as you zoom),
+      // and when it is actually moving/swaying we let the full amplified error
+      // through — that makes a still zoomed hold stay clean while a sway at
+      // high magnification still blackens hard. swayAct / stillZoom computed
+      // above in the sway block.
+      const restGain = zoomSwayOnly
+        ? THREE.MathUtils.lerp(1.0, 0.18, stillZoom)
+        : 1.0;
+      const zoomGain = THREE.MathUtils.lerp(restGain, 1.0, swayAct);
+      const eyeUEff = eyeU * zoomGain;
+      const eyeVEff = eyeV * zoomGain;
+      const reliefEff = THREE.MathUtils.clamp(
+        1.0 + (relief - 1.0) * zoomGain,
+        0.35,
+        3.0,
+      );
       // Operator re-seat, asymmetric: the eye LOSES the box fast (attack)
       // and re-finds it slowly (release). Fast L-R flicks punch shadow in
       // on every reversal instead of averaging out to nothing.
@@ -2204,8 +2287,8 @@ function animate(): void {
       {
         const aimRising = isAiming && !prevAiming;
         prevAiming = isAiming;
-        let tgtX = eyeU;
-        let tgtY = eyeV;
+        let tgtX = eyeUEff;
+        let tgtY = eyeVEff;
         if (eyeBoxMode === 2) {
           const wob =
             0.10 * (0.7 + 0.3 * Math.sin(time * 0.9 + seedA)) *
@@ -2223,12 +2306,12 @@ function animate(): void {
           releaseRate = isAiming ? (breathHeld ? 3.0 : 0.35) : 8.0;
         }
         const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
-        const relDev = Math.abs(relief - 1);
+        const relDev = Math.abs(reliefEff - 1);
         const relCur = Math.abs(_reliefSm - 1);
         const relRate = Math.min(1, (relDev > relCur ? 12 : 5) * delta);
         _eyeSm.x += (tgtX - _eyeSm.x) * eyeRate;
         _eyeSm.y += (tgtY - _eyeSm.y) * eyeRate;
-        _reliefSm += (relief - _reliefSm) * relRate;
+        _reliefSm += (reliefEff - _reliefSm) * relRate;
       }
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
