@@ -793,7 +793,7 @@ const lensMat = new THREE.ShaderMaterial({
     uAberration: { value: 0.016 },
     uVignetteSize: { value: 0.485 },
     uShadowHardness: { value: 0.06 },
-    uParallaxSens: { value: 1.06 },
+    uParallaxSens: { value: 1.0 },
     uEyeOffset: { value: new THREE.Vector2(0, 0) },
     uEyeRelief: { value: 1.0 },
     uZoomK: { value: 1.0 },
@@ -874,19 +874,46 @@ const lensMat = new THREE.ShaderMaterial({
       float r2 = dot(p, p);
       return p * (1.0 + k * r2 + k * 0.6 * r2 * r2 + k * 0.3 * r2 * r2 * r2);
     }
+    // Area determinant of barrelWarp (the inverse map). Conserves flux: a compressed
+    // rim dims slightly, an expanded rim brightens. Clamped at use site.
+    float barrelJac(vec2 p, float k) {
+      float r2 = dot(p, p);
+      float g  = 1.0 + k * r2 + k * 0.6 * r2 * r2 + k * 0.3 * r2 * r2 * r2;
+      float gp = k + k * 1.2 * r2 + k * 0.9 * r2 * r2;   // dg/d(r2)
+      return g * (g + 2.0 * r2 * gp);
+    }
     // Chromatic sample at one bent coord. Transverse CA: R/B bend linearly
     // with radius (real lateral color scales ~r, not r^2) — the fringe is
-    // invisible at center and grows to a couple px at the rim. 'axial' adds a
-    // longitudinal component that bows with defocus (blue focuses short, red
-    // long), so off-focus edges smear magenta/green like real glass.
-    vec3 sampleSight(vec2 buv, float brv, float aberr, float axial) {
-      float k = aberr * brv + axial * brv * brv;
-      vec2 sR = buv * (1.0 - k);
-      vec2 sB = buv * (1.0 + k);
+    // invisible at center and grows to a couple px at the rim. Longitudinal
+    // color is handled separately as per-channel defocus in the blur taps.
+    vec3 sampleSight(vec2 buv, float brv, float aberr) {
+      float lat = aberr * brv;
+      vec2 sR = buv * (1.0 - lat);
+      vec2 sB = buv * (1.0 + lat);
       float rr = texture2D(tDiffuse, sR + 0.5).r;
       float gg = texture2D(tDiffuse, buv + 0.5).g;
       float bb = texture2D(tDiffuse, sB + 0.5).b;
       return vec3(rr, gg, bb);
+    }
+    // Illuminated sniper chevron mask at one scale (q in fixed pi space).
+    // Called per channel with a slightly scaled q so the lit core fringes
+    // with the same chromatic aberration as the world image behind it.
+    float illumSniper(vec2 q, vec2 ap, vec2 fl, vec2 fr, float fw) {
+      float dc = min(sdSegment(q, ap, fl), sdSegment(q, ap, fr));
+      float w  = max(0.001 * fw, fwidth(dc) * 1.5);
+      return (1.0 - smoothstep(0.0016, 0.0016 + w, dc))
+           + (1.0 - smoothstep(0.0012, 0.0012 + w, length(q - ap))) * 0.7;
+    }
+    // Illuminated ACOG dot + horseshoe ring at one scale (q in pi space).
+    float illumAcog(vec2 q, float fw) {
+      float dd = length(q);
+      float wd = max(0.002 * fw, fwidth(dd) * 1.5);
+      float dotC = 1.0 - smoothstep(0.0035, 0.0035 + wd, dd);
+      float dr = abs(dd - 0.032);
+      float ra = atan(q.y, q.x);
+      float rg = smoothstep(0.3, 0.55, abs(ra + 1.5708));
+      float wr = max(0.0014 * fw, fwidth(dr) * 1.5);
+      return clamp(dotC + (1.0 - smoothstep(0.0018, 0.0018 + wr, dr)) * rg, 0.0, 1.0);
     }
     // Analytically anti-aliased primitives (fwidth): etch lines stay hairline
     // without shimmering at 1px widths.
@@ -946,19 +973,23 @@ const lensMat = new THREE.ShaderMaterial({
       // crescent, and the full picture only lands at the end of ADS — like
       // finding the eye box on a real optic. Do NOT linearize this.
       float eyeBox = smoothstep(0.15, 0.98, uAdsWeight);
-      // Exit-pupil aperture: symmetric bell peaked at relief 1.0, falling off
-      // both ways — too far shrinks the exit-pupil disc below the eye pupil
-      // (narrower FOV), too close defocuses and tightens the effective pupil.
-      // One smooth physical term replaces the old reliefShrink * tooClose
-      // product (two near-cancelling fudge curves multiplied together).
+      // Exit-pupil aperture, modelled as real geometry: the ocular forms an
+      // exit-pupil disc behind the last element whose radius is ~ 1/relief.
+      // Back off and the disc shrinks below the (fixed) eye pupil, clamping
+      // the bright field; come too close and the eye pupil itself is the
+      // limiting stop (full aperture, but defocus — below — takes over). No
+      // more symmetric bell fudge: one physical min() of two discs.
       float reliefErr = abs(uEyeRelief - 1.0);
-      float pupilAperture = 1.0 / (1.0 + reliefErr * reliefErr * 1.6);
+      // Exit-pupil disc radius: shrinks ~1/relief as the eye backs off, so it
+      // falls inside the fixed eye pupil (seated size = uVignetteSize) — the
+      // real limiting stop when seated or closer. min() of the two discs.
+      float exitR = uVignetteSize / max(uEyeRelief, 0.5);
       // NOTE: no base-aperture zoom penalty. A perfectly seated eye sees the
       // FULL field through the ocular at any magnification — the picture must
       // stay full-size and full-bright when you're still. The zoom penalty
       // lives in the *error response* (uEyeOffset/uEyeRelief are amplified by
       // zoomTighten in JS), so it only bites when you sway, never when centered.
-      float currentAperture = uVignetteSize * pupilAperture * mix(0.35, 1.0, eyeBox);
+      float currentAperture = min(exitR, uVignetteSize) * mix(0.35, 1.0, eyeBox);
       float shadowK = uShadowHardness * mix(1.7, 0.75, clamp(2.0 - uEyeRelief, 0.0, 1.0));
       // zoomed glass punishes harder: edge hardens with magnification
       shadowK *= 1.0 + (uZoomK - 1.0) * 0.25;
@@ -975,10 +1006,11 @@ const lensMat = new THREE.ShaderMaterial({
 
       // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
       // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
-      // just darkness). 5-tap cross, radius tracks total eye error. Computed
-      // before the CA/distortion block so the axial color can ride on it.
+      // just darkness). Cross blur radius tracks total eye error, with extra
+      // per-channel longitudinal taps added below. Computed before the
+      // CA/distortion block so the axial color can ride on it.
       // (inputs already zoom-amplified in JS — no uZoomK re-multiply here.)
-      float blurMix = clamp(abs(uEyeRelief - 1.0) * 0.9 + swayDist * 0.6, 0.0, 1.0);
+      float blurMix = clamp(abs(uEyeRelief - 1.0) * 1.6 + swayDist * 0.8, 0.0, 1.0);
 
       // Physical lateral CA: zero at center, grows to the rim. A real ocular's
       // transverse color makes a visible magenta/green fringe at the edge of
@@ -997,7 +1029,8 @@ const lensMat = new THREE.ShaderMaterial({
       // grows with eye relief (sway) and hard zoom, so the distortion lives at
       // the screen edge exactly where eye relief and magnification bite.
       // Distorted around the shifted image plane so glass feels volumetric.
-      vec2 imgUv = uv + imageShift;
+      float imageScale = uEyeRelief;              // 1 seated; >1 far (image shrinks); <1 close (grows)
+      vec2 imgUv = (uv + imageShift) * imageScale;
       float swayBoost = min(swayDist * 2.0, 1.0);
       float zoomBoost = clamp((uZoomK - 1.0) * 0.45, 0.0, 1.0);
       // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
@@ -1005,18 +1038,29 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
-      float blurR = blurMix * 0.006;
-      vec3 sharpC = sampleSight(baseUv, br, dynamicAberration, axialAberration);
-      vec3 bx = (sampleSight(baseUv + vec2(blurR, 0.0), br, dynamicAberration, axialAberration)
-        + sampleSight(baseUv - vec2(blurR, 0.0), br, dynamicAberration, axialAberration)) * 0.5;
-      vec3 by = (sampleSight(baseUv + vec2(0.0, blurR), br, dynamicAberration, axialAberration)
-        + sampleSight(baseUv - vec2(0.0, blurR), br, dynamicAberration, axialAberration)) * 0.5;
+      float blurR = blurMix * 0.012;
+      vec3 sharpC = sampleSight(baseUv, br, dynamicAberration);
+      vec3 bx = (sampleSight(baseUv + vec2(blurR, 0.0), br, dynamicAberration)
+        + sampleSight(baseUv - vec2(blurR, 0.0), br, dynamicAberration)) * 0.5;
+      vec3 by = (sampleSight(baseUv + vec2(0.0, blurR), br, dynamicAberration)
+        + sampleSight(baseUv - vec2(0.0, blurR), br, dynamicAberration)) * 0.5;
       vec3 sceneColor = mix(sharpC, (bx + by) * 0.5, blurMix);
+      // Longitudinal color = per-channel defocus (not a radial scale): blue
+      // focuses short, red long, straddling the green plane. Split opposite
+      // cross-taps so out-of-focus edges smear magenta/green like real glass.
+      float ax = axialAberration * 0.004;                  // longitudinal split
+      vec3 axR = (sampleSight(baseUv + vec2(ax, 0.0), br, dynamicAberration)
+        + sampleSight(baseUv - vec2(ax, 0.0), br, dynamicAberration)) * 0.5;
+      vec3 axB = (sampleSight(baseUv + vec2(0.0, ax), br, dynamicAberration)
+        + sampleSight(baseUv - vec2(0.0, ax), br, dynamicAberration)) * 0.5;
+      sceneColor.r = mix(sceneColor.r, axR.r, min(axialAberration * 4.0, 1.0));
+      sceneColor.b = mix(sceneColor.b, axB.b, min(axialAberration * 4.0, 1.0));
       // Coated-glass transmission loss + off-axis dimming: ADS center runs
       // ~78% of naked-eye brightness, hip peephole collapses toward 30%.
       // (Deliberately under, not over — the old 0.9 + additive lifts read as
       // a flashlight inside the tube.)
       sceneColor *= 0.78 * reliefDim * uGlassTint;
+      sceneColor *= clamp(barrelJac(imgUv, barrelK), 0.55, 1.5);
 
       // ---- LENS SMUDGE & DIRT: baked texture, glint-only ----
       // uDirtOpacity ~0.05 by default: effectively invisible unless sun catches it.
@@ -1062,7 +1106,8 @@ const lensMat = new THREE.ShaderMaterial({
       float sR = sin(uReticleRoll);
       vec2 rcGun = vec2(cR * rcBent.x + sR * rcBent.y, -sR * rcBent.x + cR * rcBent.y);
       // Eye-distance size cue: closer eye reads the etch slightly larger.
-      vec2 p = rcGun / (uReticleScale * (0.92 + 0.08 * uEyeRelief));
+      vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
+      vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
       bool isAcog = uOpticMode > 0.5;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
@@ -1092,40 +1137,37 @@ const lensMat = new THREE.ShaderMaterial({
       float focusW = 1.0 + swayDist * 5.0;
       float illumDim = 1.0 - clamp(swayDist * 1.2, 0.0, 0.45);
 
-      // SNIPER illumination: small chevron, apex = point of impact
+      // SNIPER illumination geometry: small chevron, apex = point of impact.
+      // Measured in the fixed focal-plane scale (pi) so the lit core and its
+      // halo hold size against the zooming FFP etch. Actual masks are built by
+      // illumSniper/illumAcog below (three channels for reticle CA).
       vec2 apex = vec2(0.0, 0.004);
       vec2 footL = vec2(-0.02, -0.016);
       vec2 footR = vec2(0.02, -0.016);
-      float dChev = min(sdSegment(p, apex, footL), sdSegment(p, apex, footR));
-      // fwidth floors: sub-pixel edges widen instead of sparkling.
-      float wChev = max(0.001 * focusW, fwidth(dChev) * 1.5);
-      float sniperCore = (1.0 - smoothstep(0.0016, 0.0016 + wChev, dChev))
-        + (1.0 - smoothstep(0.0012, 0.0012 + wChev, length(p - apex))) * 0.7;
+      float dChev = min(sdSegment(pi, apex, footL), sdSegment(pi, apex, footR));
 
-      // ACOG / RED DOT illumination: big glowing dot + horseshoe ring
-      float dDot = length(p);
-      float wDot = max(0.002 * focusW, fwidth(dDot) * 1.5);
-      float dotCore = 1.0 - smoothstep(0.0035, 0.0035 + wDot, dDot);
+      // ACOG / RED DOT geometry: big glowing dot + horseshoe ring (pi space)
+      float dDot = length(pi);
       float dRing = abs(dDot - 0.032);
-      float ringAng = atan(p.y, p.x); // horseshoe gap at bottom (angle ~ -PI/2)
-      float ringGate = smoothstep(0.3, 0.55, abs(ringAng + 1.5708));
-      float wRing = max(0.0014 * focusW, fwidth(dRing) * 1.5);
-      float horseCore = (1.0 - smoothstep(0.0018, 0.0018 + wRing, dRing)) * ringGate;
-      float acogCore = clamp(dotCore + horseCore, 0.0, 1.0);
-
-      float illumMask = (isAcog ? acogCore : clamp(sniperCore, 0.0, 1.0)) * illumDim;
 
       // bloom: tight halo in dark environments (battery bleed)
       // ACOG dot blooms wider than the sniper chevron on purpose.
       float haloDist = isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev;
-      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(p) * 22.0) * 0.08;
+      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(pi) * 22.0) * 0.08;
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
 
       float reticleVis = (1.0 - smoothstep(currentAperture - shadowK, currentAperture, ellR(uv, imageCenter, tiltDir, tiltCos))) * etchVis;
       sceneColor = mix(sceneColor, vec3(0.0), etchedMask * 0.82 * reticleVis);
-      // illuminated chevron sits on top of etch
-      sceneColor += uReticleColor * illumMask * glowStrength * reticleVis;
+      // illuminated core on top of the etch, with its OWN chromatic aberration:
+      // the lit mask is sampled per channel at three radial scales so the
+      // chevron/dot fringes like the world image bending behind it.
+      float retCa = dynamicAberration * reticleVis;        // reuse image CA amplitude
+      float coreG = isAcog ? illumAcog(pi, focusW) : illumSniper(pi, apex, footL, footR, focusW);
+      float coreR = isAcog ? illumAcog(pi * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW);
+      float coreB = isAcog ? illumAcog(pi * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW);
+      vec3 illumCol = vec3(coreR, coreG, coreB) * illumDim;
+      sceneColor += uReticleColor * illumCol * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
       // battery bleed: tight faint wash that never blooms with glowStrength
       // (decoupling it is what keeps the sight picture from lifting)
@@ -1293,8 +1335,9 @@ const lensMat = new THREE.ShaderMaterial({
         float fresBoost = (0.35 + 0.65 * fresSway) * (1.0 + fresZoom);
         // objective fresnel: dark neutral reflection, faint cool lift at the
         // rim, stronger off-axis / zoomed — sits behind the image like glass
-        float objFres = smoothstep(0.14, 0.5, distFromCenter);
-        objFres *= objFres;
+        float objR = distFromCenter / 0.5;                 // 0..1
+        float cosInc = 1.0 / sqrt(1.0 + objR * objR * 3.0);
+        float objFres = pow(1.0 - cosInc, 4.0);
         vec3 objRefl = mix(vec3(0.03, 0.035, 0.045), vec3(0.20, 0.24, 0.30), objFres);
         sceneColor = mix(sceneColor, objRefl,
           objFres * (0.05 + 0.14 * uSunIntensity) * fresBoost * (1.0 - objectiveMask));
@@ -1329,7 +1372,7 @@ const lensMat = new THREE.ShaderMaterial({
 
       // Sight-picture brightness: dim center (transmission loss, above), real
       // falloff toward the rim. Never lift the image.
-      float brightT = smoothstep(0.0, uVignetteSize, length(uv - imageCenter));
+      float brightT = smoothstep(0.0, currentAperture, length(uv - imageCenter));
       finalColor *= mix(1.0, 0.62, brightT);
 
       // faint grain for tactical grit (not in the black tunnel)
