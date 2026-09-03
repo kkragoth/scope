@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import './style.css';
 
 const scene = new THREE.Scene();
@@ -25,6 +26,10 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// PERF: 3 scene renders per ADS frame (scope RT + main RT + composite reads
+// no depth, so 2 depth renders) — without this the shadow map would render
+// on EVERY render() call. One refresh per frame, before the first render.
+renderer.shadowMap.autoUpdate = false;
 document.body.appendChild(renderer.domElement);
 
 // Image-based lighting: one-time PMREM bake gives metals/glass something to
@@ -102,8 +107,9 @@ const skyMat = new THREE.ShaderMaterial({
       float cover = smoothstep(0.52, 0.74, cl) * smoothstep(0.02, 0.18, h);
       vec3 cloudCol = mix(vec3(0.62, 0.63, 0.65), vec3(1.06, 0.96, 0.86), pow(s, 3.0));
       col = mix(col, cloudCol, cover * 0.7);
-      // disc + tight halo + wide haze — kept minimal on purpose
-      col += vec3(1.0, 0.93, 0.82) * pow(s, 1500.0) * 2.5;
+      // disc (smaller, hotter ball) + tight halo + mid haze + wide warmth
+      col += vec3(1.0, 0.95, 0.86) * pow(s, 3500.0) * 5.0;
+      col += vec3(1.0, 0.92, 0.78) * pow(s, 900.0) * 0.9;
       col += vec3(1.0, 0.90, 0.75) * pow(s, 160.0) * 0.28;
       col += vec3(0.95, 0.85, 0.70) * pow(s, 7.0) * 0.07;
       gl_FragColor = vec4(col, 1.0);
@@ -132,6 +138,36 @@ function makeGlowTexture(): THREE.CanvasTexture {
   ctx.fillRect(0, 0, 256, 256);
   return new THREE.CanvasTexture(c);
 }
+// Star-spiked muzzle flash, baked once.
+function makeFlashTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  const ctx = c.getContext('2d') as CanvasRenderingContext2D;
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0.0, 'rgba(255,255,240,1)');
+  g.addColorStop(0.25, 'rgba(255,210,130,0.8)');
+  g.addColorStop(0.6, 'rgba(255,150,60,0.25)');
+  g.addColorStop(1.0, 'rgba(255,140,50,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.strokeStyle = 'rgba(255,220,160,0.85)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(64, 4);
+  ctx.lineTo(64, 124);
+  ctx.moveTo(4, 64);
+  ctx.lineTo(124, 64);
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(24, 24);
+  ctx.lineTo(104, 104);
+  ctx.moveTo(104, 24);
+  ctx.lineTo(24, 104);
+  ctx.stroke();
+  return new THREE.CanvasTexture(c);
+}
 const sunSprite = new THREE.Sprite(
   new THREE.SpriteMaterial({
     map: makeGlowTexture(),
@@ -143,6 +179,20 @@ const sunSprite = new THREE.Sprite(
 );
 sunSprite.scale.setScalar(110);
 scene.add(sunSprite);
+// PERF bloom: a second tight core sprite instead of a post chain. Wide glow
+// reads at all angles (positional haze); the core only fires when facing the
+// sun. +1 draw call, no fullscreen passes.
+const sunCore = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: makeGlowTexture(),
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+    fog: false,
+  }),
+);
+sunCore.scale.setScalar(26);
+scene.add(sunCore);
 const _camWorld = new THREE.Vector3();
 
 const floorGeo = new THREE.PlaneGeometry(500, 500, 20, 20);
@@ -233,14 +283,50 @@ playerGroup.add(pitchObject);
 pitchObject.add(camera);
 camera.layers.enable(1);
 
+// PERF: all micro-surface detail is baked (geometry once, texture once).
+// Zero per-frame cost — no procedural normals/roughness in shaders.
+// Baked grayscale speckle multiplies scalar roughness: worn edges read
+// matte, flats keep a faint sheen. Shared across every weapon part.
+function makeMicronoiseTexture(): THREE.CanvasTexture {
+  const S = 128;
+  const c = document.createElement('canvas');
+  c.width = S;
+  c.height = S;
+  const ctx = c.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#8a8a8a';
+  ctx.fillRect(0, 0, S, S);
+  for (let i = 0; i < 1600; i++) {
+    const v = 110 + ((Math.random() * 90) | 0);
+    ctx.fillStyle = `rgb(${v},${v},${v})`;
+    ctx.fillRect(Math.random() * S, Math.random() * S, 1.5, 1.5);
+  }
+  for (let i = 0; i < 24; i++) {
+    const x = Math.random() * S;
+    const y = Math.random() * S;
+    const r = 4 + Math.random() * 14;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const v = 120 + ((Math.random() * 60) | 0);
+    g.addColorStop(0, `rgba(${v},${v},${v},0.5)`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
 const weaponGroup = new THREE.Group();
 pitchObject.add(weaponGroup);
 
 const weaponMat = new THREE.MeshStandardMaterial({
   color: 0x4b4f55,
-  roughness: 0.55,
-  metalness: 0.35,
+  roughness: 0.62,
+  metalness: 0.5,
   side: THREE.DoubleSide,
+  roughnessMap: makeMicronoiseTexture(),
+  envMapIntensity: 0.8,
 });
 
 // ---- Rifle: full-length barrel, receiver block, ring-mounted scope ----
@@ -295,15 +381,16 @@ windage.position.set(0.068, 0, 0.03);
 windage.layers.set(1);
 weaponGroup.add(windage);
 
-// Receiver: rectangular block below the barrel
-const receiverGeo = new THREE.BoxGeometry(0.075, 0.16, 0.9);
+// Receiver: rectangular block below the barrel (edges eased — catches sky
+// highlights instead of razor CG edges; same tri-count class, baked once)
+const receiverGeo = new RoundedBoxGeometry(0.075, 0.16, 0.9, 2, 0.01);
 const receiver = new THREE.Mesh(receiverGeo, weaponMat);
 receiver.position.set(0, -0.225, 0.05);
 receiver.layers.set(1);
 weaponGroup.add(receiver);
 
 // Magazine + trigger blade
-const magGeo = new THREE.BoxGeometry(0.06, 0.09, 0.12);
+const magGeo = new RoundedBoxGeometry(0.06, 0.09, 0.12, 2, 0.008);
 const magazine = new THREE.Mesh(magGeo, weaponMat);
 magazine.position.set(0, -0.34, -0.05);
 magazine.layers.set(1);
@@ -342,6 +429,53 @@ const muzzleBrake = new THREE.Mesh(brakeGeo, weaponMat);
 muzzleBrake.position.set(0, BORE_Y, -1.38);
 muzzleBrake.layers.set(1);
 weaponGroup.add(muzzleBrake);
+
+// Muzzle flash: one additive sprite at the brake tip, 60ms life. Layer 0 so
+// it reads in the naked view AND through the scope. No point light — light
+// count changes recompile every forward shader; a sprite costs one draw.
+const flashSprite = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: makeFlashTexture(),
+    color: 0xffd9a0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+    fog: false,
+  }),
+);
+flashSprite.visible = false;
+scene.add(flashSprite);
+
+// Brass pool: 10 cases, reused forever. Gold PBR picks up the IBL for free.
+interface BrassCase {
+  m: THREE.Mesh;
+  vel: THREE.Vector3;
+  spin: THREE.Vector3;
+  life: number;
+  active: boolean;
+}
+const brassPool: BrassCase[] = [];
+{
+  const brassGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.013, 8);
+  const brassMat = new THREE.MeshStandardMaterial({
+    color: 0xc8a038,
+    metalness: 1.0,
+    roughness: 0.35,
+  });
+  for (let i = 0; i < 10; i++) {
+    const m = new THREE.Mesh(brassGeo, brassMat);
+    m.visible = false;
+    scene.add(m);
+    brassPool.push({ m, vel: new THREE.Vector3(), spin: new THREE.Vector3(), life: 0, active: false });
+  }
+}
+let brassIdx = 0;
+const _mzl = new THREE.Vector3();
+const _brassP = new THREE.Vector3();
+const _brassQ = new THREE.Quaternion();
+const _bRight = new THREE.Vector3();
+const _bUp = new THREE.Vector3();
+const _bFwd = new THREE.Vector3();
 
 // Scope rail on top of the receiver
 const railGeo = new THREE.BoxGeometry(0.04, 0.015, 0.5);
@@ -394,12 +528,12 @@ acogGroup.visible = false;
   aBrake.layers.set(1);
   acogGroup.add(aBrake);
 
-  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.45), weaponMat);
+  const guard = new THREE.Mesh(new RoundedBoxGeometry(0.08, 0.1, 0.45, 2, 0.01), weaponMat);
   guard.position.set(0, -0.15, -0.32);
   guard.layers.set(1);
   acogGroup.add(guard);
 
-  const aRecv = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.16, 0.6), weaponMat);
+  const aRecv = new THREE.Mesh(new RoundedBoxGeometry(0.075, 0.16, 0.6, 2, 0.01), weaponMat);
   aRecv.position.set(0, -0.225, 0.2);
   aRecv.layers.set(1);
   acogGroup.add(aRecv);
@@ -409,7 +543,7 @@ acogGroup.visible = false;
   aRail.layers.set(1);
   acogGroup.add(aRail);
 
-  const aMag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.09, 0.12), weaponMat);
+  const aMag = new THREE.Mesh(new RoundedBoxGeometry(0.06, 0.09, 0.12, 2, 0.008), weaponMat);
   aMag.position.set(0, -0.34, 0.15);
   aMag.layers.set(1);
   acogGroup.add(aMag);
@@ -421,7 +555,7 @@ acogGroup.visible = false;
 
   // Prism housing + ocular/objective cups (optic axis stays y = 0 so ADS
   // stays centered for both rifles)
-  const housing = new THREE.Mesh(new THREE.BoxGeometry(0.062, 0.075, 0.24), weaponMat);
+  const housing = new THREE.Mesh(new RoundedBoxGeometry(0.062, 0.075, 0.24, 2, 0.008), weaponMat);
   housing.position.set(0, 0, 0);
   housing.layers.set(1);
   acogGroup.add(housing);
@@ -467,6 +601,123 @@ acogGroup.visible = false;
 const scopeTarget = new THREE.WebGLRenderTarget(768, 768, {
   format: THREE.RGBAFormat,
 });
+
+// ---- ADS DOF (gated: zero cost at hip) ----
+// PERF budget: main view → 2xMSAA RT w/ depth → half-res 9-tap H+V →
+// fullscreen composite. Only while shouldered; hip renders direct as before.
+// Blur lives at half res (~0.5ms), composite is one fullscreen pass.
+const dofDepth = new THREE.DepthTexture(2, 2);
+const mainTarget = new THREE.WebGLRenderTarget(2, 2, {
+  samples: 2,
+  depthTexture: dofDepth,
+});
+const blurA = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: false });
+const blurB = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: false });
+const _dofSize = new THREE.Vector2();
+function sizeDofTargets(): void {
+  renderer.getDrawingBufferSize(_dofSize);
+  mainTarget.setSize(_dofSize.x, _dofSize.y);
+  blurA.setSize(Math.max(_dofSize.x >> 1, 2), Math.max(_dofSize.y >> 1, 2));
+  blurB.setSize(Math.max(_dofSize.x >> 1, 2), Math.max(_dofSize.y >> 1, 2));
+}
+sizeDofTargets();
+
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const POST_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+const blurMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tSrc: { value: null },
+    uDir: { value: new THREE.Vector2(1, 0) },
+    uTexel: { value: new THREE.Vector2(1 / 256, 1 / 256) },
+  },
+  vertexShader: POST_VERT,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tSrc;
+    uniform vec2 uDir;
+    uniform vec2 uTexel;
+    varying vec2 vUv;
+    void main() {
+      vec2 o1 = uDir * uTexel * 1.384;
+      vec2 o2 = uDir * uTexel * 3.230;
+      vec3 c = texture2D(tSrc, vUv).rgb * 0.227027;
+      c += texture2D(tSrc, vUv + o1).rgb * 0.3162162;
+      c += texture2D(tSrc, vUv - o1).rgb * 0.3162162;
+      c += texture2D(tSrc, vUv + o2).rgb * 0.0702703;
+      c += texture2D(tSrc, vUv - o2).rgb * 0.0702703;
+      gl_FragColor = vec4(c, 1.0);
+    }
+  `,
+  depthTest: false,
+  depthWrite: false,
+});
+const blurScene = new THREE.Scene();
+{
+  const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blurMat);
+  q.frustumCulled = false;
+  blurScene.add(q);
+}
+// Composite: CoC from depth, asymmetric (foreground melts fast, background
+// forgiving, sky gated near-sharp), gun kept crisp. Grades once (linear in).
+const dofMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tSharp: { value: mainTarget.texture },
+    tBlur: { value: blurB.texture },
+    tDepth: { value: dofDepth },
+    uNear: { value: 0.02 },
+    uFar: { value: 1000 },
+    uFocus: { value: 60 },
+    uStrength: { value: 0 },
+  },
+  vertexShader: POST_VERT,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tSharp;
+    uniform sampler2D tBlur;
+    uniform sampler2D tDepth;
+    uniform float uNear;
+    uniform float uFar;
+    uniform float uFocus;
+    uniform float uStrength;
+    varying vec2 vUv;
+    void main() {
+      vec3 sharp = texture2D(tSharp, vUv).rgb;
+      float depth01 = texture2D(tDepth, vUv).x;
+      float dist = -(uNear * uFar) / ((uFar - uNear) * depth01 - uFar);
+      float coc = dist > uFocus
+        ? (dist - uFocus) / (uFocus * 1.2 + 30.0)
+        : (uFocus - dist) / (uFocus * 0.3 + 3.0);
+      coc = clamp(coc, 0.0, 1.0);
+      // gun + sky stay readable; the world between melts
+      float nearKeep = 1.0 - smoothstep(0.5, uFocus * 0.6, dist);
+      coc *= 1.0 - nearKeep * 0.85;
+      coc *= 1.0 - smoothstep(0.9995, 1.0, depth01) * 0.88;
+      vec3 col = mix(sharp, texture2D(tBlur, vUv).rgb, clamp(coc * uStrength, 0.0, 1.0));
+      gl_FragColor = vec4(col, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }
+  `,
+  depthTest: false,
+  depthWrite: false,
+});
+const dofScene = new THREE.Scene();
+{
+  const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), dofMat);
+  q.frustumCulled = false;
+  dofScene.add(q);
+}
+let dofActive = false;
+// Focus distance: throttled center ray (every 6th frame), smoothed.
+const focusRay = new THREE.Raycaster();
+const _focusDir = new THREE.Vector3();
+const _focusPos = new THREE.Vector3();
+let focusSm = 60;
+let focusTick = 0;
 
 const scopeCamera = new THREE.PerspectiveCamera(3.0, 1, 0.1, 1000);
 scopeCamera.layers.set(0);
@@ -546,6 +797,7 @@ const lensMat = new THREE.ShaderMaterial({
     uOpticMode: { value: 0.0 },
     uSunFacing: { value: 0.0 },
     uReticleScale: { value: 1.0 },
+    uDofRings: { value: 1.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -577,6 +829,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uOpticMode;
     uniform float uSunFacing;
     uniform float uReticleScale;
+    uniform float uDofRings;
     varying vec2 vUv;
 
     float hash21(vec2 p) {
@@ -853,6 +1106,13 @@ const lensMat = new THREE.ShaderMaterial({
         sceneColor += vec3(0.85, 0.92, 1.0) * ghost * glare * uSunFacing * 0.03 * reticleVis;
       }
 
+      // OUTER-RING DOF (toggle T): shallow depth of field lives in the glass —
+      // baffles wash out, rim bands widen, crescent edge relaxes — scaled by
+      // zoom at ADS. Sight center stays crisp (own defocus path above).
+      float outerSoft = uDofRings
+        * clamp((uZoomK - 1.0) * 0.5, 0.0, 1.0)
+        * smoothstep(0.3, 0.9, uAdsWeight);
+
       // ---- 3D TUNNEL: matte-black baffled tube + edge crescent + rim glint ----
       // Hip reads as ~95% ocular shadow (tiny dim tilted peephole) by design —
       // currentAperture/etchVis/reliefDim above already encode that. Do NOT
@@ -899,7 +1159,8 @@ const lensMat = new THREE.ShaderMaterial({
           * (0.10 + min(eyeMag2 * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
       }
       // thin objective-bell crescent right at the image edge, sun side only
-      float crescentLine = 1.0 - smoothstep(0.0, 0.022, abs(distTube - currentAperture));
+      // (widens under ring-DOF like the rest of the glass furniture)
+      float crescentLine = 1.0 - smoothstep(0.0, 0.022 + outerSoft * 0.02, abs(distTube - currentAperture));
       float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
       tubeWall += vec3(1.0, 0.94, 0.84) * crescent * uSunFacing * 0.12 * objectiveMask;
 
@@ -915,6 +1176,7 @@ const lensMat = new THREE.ShaderMaterial({
       // perspective — even spacing reads flat, bunching reads deep.
       float transitBoost = (1.0 + transit * 1.2) * (1.0 + (uZoomK - 1.0) * 0.3);
       float baffles = 0.5 + 0.5 * sin(distTube * (200.0 + distTube * 160.0));
+      baffles = mix(baffles, 0.5, outerSoft * 0.8);
       tubeWall *= (0.78 + 0.22 * baffles);
       // depth falloff: the far end of the tunnel falls darker (tube length read)
       tubeWall *= mix(1.0, 0.55, smoothstep(currentAperture, 0.5, distTube));
@@ -935,9 +1197,9 @@ const lensMat = new THREE.ShaderMaterial({
 
       // ocular rim: hard clip + machined inner bevel + thin sun-line on edge
       float ocularShadow = smoothstep(0.485, 0.5, distOcular);
-      float ringBand = 1.0 - smoothstep(0.0, 0.006, abs(distOcular - 0.48));
+      float ringBand = 1.0 - smoothstep(0.0, 0.006 + outerSoft * 0.008, abs(distOcular - 0.48));
       // bevel: hairline lit chamfer just inside the rim sells the metal edge
-      float bevel = 1.0 - smoothstep(0.0, 0.010, abs(distOcular - 0.466));
+      float bevel = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.010, abs(distOcular - 0.466));
       vec2 ocuN = distOcular > 1e-4 ? uv / distOcular : vec2(0.0, 1.0);
       float ringGlint = pow(max(dot(ocuN, sunN) * 0.5 + 0.5, 0.0), 3.0);
       vec3 ringLight = vec3(0.92, 0.92, 0.92) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.45);
@@ -984,7 +1246,7 @@ acogGroup.add(aLens);
 // spec, coating hue. Layer 1 only, so the scope render camera never sees
 // them (no feedback into its own render target).
 function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({
+  const mat = new THREE.ShaderMaterial({
     transparent: ocular,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -1035,7 +1297,7 @@ function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMateri
           vec3 col = vec3(0.35, 0.45, 0.55) * fres * uReflect
             + vec3(1.0, 0.95, 0.85) * spec * 1.2
             + coat * fres * 0.12;
-          float alpha = clamp(0.03 + fres * 0.7 * uReflect + spec + edgeGlow, 0.0, 0.9);
+          float alpha = clamp(0.03 + fres * 0.55 * uReflect + spec + edgeGlow, 0.0, 0.9);
           gl_FragColor = vec4(col, alpha);
         } else {
           // front element: dark coated glass, mirrored sky + hot sun glint
@@ -1050,6 +1312,7 @@ function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMateri
       }
     `,
   });
+  return mat;
 }
 
 function addGlass(
@@ -1135,6 +1398,13 @@ document.addEventListener('mousemove', (event: MouseEvent) => {
 
 document.addEventListener('mousedown', (e: MouseEvent) => {
   if (e.button === 2) isAiming = true;
+  if (e.button === 0) {
+    triggerHeld = true;
+    tryFire();
+  }
+});
+document.addEventListener('mouseup', (e: MouseEvent) => {
+  if (e.button === 0) triggerHeld = false;
 });
 document.addEventListener('mouseup', (e: MouseEvent) => {
   if (e.button === 2) isAiming = false;
@@ -1172,11 +1442,13 @@ function setOpticMode(acog: boolean): void {
   // Swap whole rifle models, not just reticles
   sniperGroup.visible = !acog;
   acogGroup.visible = acog;
+  acogActive = acog;
   config.fov = acog ? ACOG_FOV : SNIPER_FOV;
   scopeCamera.fov = config.fov;
   // Objective station differs per housing (sniper bell vs ACOG cup)
   scopeCamera.position.z = acog ? -0.14 : -(tubeLength / 2);
   scopeCamera.updateProjectionMatrix();
+  updateAmmoUI();
 }
 
 document.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -1198,6 +1470,17 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (k === 'f') {
     ffpEnabled = !ffpEnabled;
   }
+  if (k === 'v') {
+    fireAuto = !fireAuto;
+    updateAmmoUI();
+  }
+  if (k === 't') {
+    dofRings = !dofRings;
+    lensMat.uniforms.uDofRings.value = dofRings ? 1.0 : 0.0;
+    (document.getElementById('dofstate') as HTMLParagraphElement).textContent =
+      `Glass DOF: ${dofRings ? 'ON' : 'OFF'} — T to toggle`;
+  }
+  if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
 });
 document.addEventListener('keyup', (e: KeyboardEvent) => {
@@ -1206,6 +1489,77 @@ document.addEventListener('keyup', (e: KeyboardEvent) => {
   if (isLeanKey(k)) leanKeys[k] = false;
   if (k === 'shift') breathHeld = false;
 });
+
+const ammoEl = document.getElementById('ammo') as HTMLParagraphElement;
+
+function updateAmmoUI(): void {
+  const mode =
+    acogActive && curAmmo() > 0 ? (fireAuto ? 'AUTO' : 'SEMI') : null;
+  ammoEl.textContent =
+    reloadT > 0
+      ? 'RELOADING…'
+      : `AMMO ${curAmmo()} / ${curMag()}${mode ? ` ${mode} — V mode` : ''} — R reload`;
+}
+
+function startReload(): void {
+  if (reloadT > 0 || curAmmo() === curMag()) return;
+  reloadT = RELOAD_TIME;
+  updateAmmoUI();
+}
+
+function tryFire(): void {
+  if (document.pointerLockElement !== document.body) return;
+  if (reloadT > 0 || fireCd > 0) return;
+  if (curAmmo() <= 0) {
+    startReload();
+    return;
+  }
+  const auto = acogActive && fireAuto;
+  setCurAmmo(curAmmo() - 1);
+  fireCd = auto ? FIRE_GAP_AUTO : FIRE_GAP_SINGLE;
+  flashT = 0.06;
+  triggerPull = 1;
+  // Recoil straight into the springs. Auto runs lighter per shot — the stack
+  // climbs through the springs naturally on a held trigger.
+  const rk = auto ? 0.45 : 1.0;
+  wRotVel.x += 2.4 * rk;
+  wRotVel.y += (Math.random() - 0.5) * 0.7 * rk;
+  wRotVel.z += (Math.random() - 0.5) * 0.5 * rk;
+  wVel.z += 1.15 * rk;
+  wVel.x += (Math.random() - 0.5) * 0.15 * rk;
+  // head takes a touch of it too + FOV punch (existing lerp settles it)
+  pitchTarget = Math.min(pitchTarget + 0.014, Math.PI / 2);
+  yawTarget += (Math.random() - 0.5) * 0.006;
+  camera.fov = Math.min(camera.fov + 2.5, 75);
+  // flash at the brake tip
+  _mzl.set(0, BORE_Y, -1.45);
+  weaponGroup.localToWorld(_mzl);
+  flashSprite.position.copy(_mzl);
+  flashSprite.scale.setScalar(0.28 + Math.random() * 0.16);
+  (flashSprite.material as THREE.SpriteMaterial).rotation = Math.random() * Math.PI;
+  (flashSprite.material as THREE.SpriteMaterial).opacity = 1;
+  flashSprite.visible = true;
+  // brass out the right side of the action
+  weaponGroup.getWorldQuaternion(_brassQ);
+  _bRight.set(1, 0, 0).applyQuaternion(_brassQ);
+  _bUp.set(0, 1, 0).applyQuaternion(_brassQ);
+  _bFwd.set(0, 0, -1).applyQuaternion(_brassQ);
+  _brassP.set(0.07, -0.19, 0.12);
+  weaponGroup.localToWorld(_brassP);
+  const b = brassPool[brassIdx];
+  brassIdx = (brassIdx + 1) % brassPool.length;
+  b.active = true;
+  b.life = 2.5;
+  b.m.visible = true;
+  b.m.position.copy(_brassP);
+  b.vel
+    .copy(_bRight)
+    .multiplyScalar(1.4 + Math.random() * 0.5)
+    .addScaledVector(_bUp, 2.0 + Math.random())
+    .addScaledVector(_bFwd, -0.4);
+  b.spin.set(Math.random() * 20, Math.random() * 20, Math.random() * 20);
+  updateAmmoUI();
+}
 
 const clock = new THREE.Clock();
 
@@ -1232,6 +1586,39 @@ let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
 let holdBlend = 0.0;
+// FIRING state: 5-round mag, bolt-action gap, bolt-throw reload. Recoil goes
+// straight into the weapon springs (wVel/wRotVel) so the gun answers with
+// mass; brass is a fixed pool (zero per-frame allocs); flash is one sprite
+// (no extra light → no forward-shader recompile, no per-frame light cost).
+const MAG_SNIPER = 5;
+const MAG_ACOG = 30;
+const FIRE_GAP_SINGLE = 0.9;
+const FIRE_GAP_AUTO = 0.12;
+const RELOAD_TIME = 1.4;
+// Per-optic ammo pools; sniper is single-fire only, ACOG toggles SEMI/AUTO (V).
+let sniperAmmo = MAG_SNIPER;
+let acogAmmo = MAG_ACOG;
+let acogActive = false;
+let fireAuto = false;
+let triggerHeld = false;
+let reloadT = 0;
+let fireCd = 0;
+let triggerPull = 0;
+let flashT = 0;
+// DOF switches: rings (scope glass, default on) vs map pipeline (parked).
+let dofRings = true;
+const dofMapEnabled = false;
+
+function curMag(): number {
+  return acogActive ? MAG_ACOG : MAG_SNIPER;
+}
+function curAmmo(): number {
+  return acogActive ? acogAmmo : sniperAmmo;
+}
+function setCurAmmo(v: number): void {
+  if (acogActive) acogAmmo = v;
+  else sniperAmmo = v;
+}
 // WHOLE-WEAPON PHYSICS: position/rotation + velocities. Anchors switch on
 // intent; the gun flies there with mass (slightly underdamped → a breath of
 // overshoot on the shoulder). ADS weight is DERIVED from gun position.
@@ -1534,6 +1921,8 @@ function animate(): void {
       0.1 + facedVis * 0.5 + swayMag * 0.2 * currentAdsWeight;
     lensMat.uniforms.uSunFacing.value = facedVis;
     (sunSprite.material as THREE.SpriteMaterial).opacity = 0.8 * sunVis;
+    sunCore.position.copy(sunSprite.position);
+    (sunCore.material as THREE.SpriteMaterial).opacity = facedVis * sunVis;
 
     // ---- TRUE PARALLAX ERROR for gameplay ----
     // Matches shader: sight clamped to 0.8*vignette, reticle = sight*sens.
@@ -1552,6 +1941,57 @@ function animate(): void {
       parallaxError.set(sx * (sens - 1.0), sy * (sens - 1.0));
     }
 
+    fireCd = Math.max(0, fireCd - delta);
+    // held trigger in AUTO sprays at FIRE_GAP_AUTO through the same path
+    if (triggerHeld && acogActive && fireAuto) tryFire();
+    if (reloadT > 0) {
+      reloadT -= delta;
+      const p = 1 - Math.max(reloadT, 0) / RELOAD_TIME;
+      // bolt throw: slides back mid-cycle, home at the end
+      const throwZ = Math.sin(p * Math.PI) * 0.05;
+      boltArm.position.z = 0.18 + throwZ;
+      boltKnob.position.z = 0.18 + throwZ;
+      boltArm.position.y = -0.195 + Math.sin(p * Math.PI) * 0.018;
+      boltKnob.position.y = -0.195 + Math.sin(p * Math.PI) * 0.018;
+      if (reloadT <= 0) {
+        setCurAmmo(curMag());
+        boltArm.position.set(0.06, -0.195, 0.18);
+        boltKnob.position.set(0.088, -0.195, 0.18);
+        updateAmmoUI();
+      }
+    }
+    // trigger pull + return
+    triggerPull = Math.max(0, triggerPull - delta * 8);
+    trigger.position.z = 0.12 + triggerPull * 0.008;
+    // flash decay
+    if (flashT > 0) {
+      flashT -= delta;
+      (flashSprite.material as THREE.SpriteMaterial).opacity = Math.max(flashT, 0) / 0.06;
+      if (flashT <= 0) flashSprite.visible = false;
+    }
+    // brass sim (pooled, zero allocs): gravity, floor bounce, spin, expiry
+    for (const b of brassPool) {
+      if (!b.active) continue;
+      b.life -= delta;
+      if (b.life <= 0) {
+        b.active = false;
+        b.m.visible = false;
+        continue;
+      }
+      b.vel.y -= 9.8 * delta;
+      b.m.position.addScaledVector(b.vel, delta);
+      if (b.m.position.y < 0.007) {
+        b.m.position.y = 0.007;
+        b.vel.y *= -0.35;
+        b.vel.x *= 0.6;
+        b.vel.z *= 0.6;
+        b.spin.multiplyScalar(0.6);
+      }
+      b.m.rotation.x += b.spin.x * delta;
+      b.m.rotation.y += b.spin.y * delta;
+      b.m.rotation.z += b.spin.z * delta;
+    }
+
     // Sun glow sits at fixed distance along SUN_DIR from the main camera
     // (negligible parallax for the scope camera at this range).
     // (_camWorld already refreshed by the occlusion test above.)
@@ -1562,11 +2002,48 @@ function animate(): void {
     dirLight.target.position.copy(playerGroup.position);
     dirLight.target.updateMatrixWorld();
 
+    // DOF focus: throttled center ray, smoothed. Raycaster sees layer 0
+    // (occluders) — the layer-1 gun can never grab focus.
+    focusTick++;
+    if (focusTick % 6 === 0) {
+      camera.getWorldPosition(_focusPos);
+      camera.getWorldDirection(_focusDir);
+      focusRay.set(_focusPos, _focusDir);
+      const hits = focusRay.intersectObjects(occluders, false);
+      const fd = hits.length > 0 ? hits[0].distance : 150;
+      focusSm += (fd - focusSm) * 0.4;
+    }
+    dofMat.uniforms.uFocus.value = focusSm;
+
     renderer.setRenderTarget(scopeTarget);
+    renderer.shadowMap.needsUpdate = true;
     renderer.render(scene, scopeCamera);
 
-    renderer.setRenderTarget(null);
-    renderer.render(scene, camera);
+    // Map-view DOF pipeline: PARKED (dofMapEnabled false) — outer-ring glass
+    // DOF carries the effect for now. Hysteresis on the switch so the
+    // MSAA/no-MSAA crossover can't flicker; strength fades with the shoulder.
+    if (dofMapEnabled && !dofActive && currentAdsWeight > 0.6) dofActive = true;
+    else if (dofActive && currentAdsWeight < 0.35) dofActive = false;
+    if (dofActive) {
+      dofMat.uniforms.uStrength.value = currentAdsWeight;
+      renderer.setRenderTarget(mainTarget);
+      renderer.render(scene, camera);
+      blurMat.uniforms.tSrc.value = mainTarget.texture;
+      (blurMat.uniforms.uDir.value as THREE.Vector2).set(1, 0);
+      (blurMat.uniforms.uTexel.value as THREE.Vector2).set(1.5 / blurA.width, 1.5 / blurA.height);
+      renderer.setRenderTarget(blurA);
+      renderer.render(blurScene, postCam);
+      blurMat.uniforms.tSrc.value = blurA.texture;
+      (blurMat.uniforms.uDir.value as THREE.Vector2).set(0, 1);
+      (blurMat.uniforms.uTexel.value as THREE.Vector2).set(1.5 / blurB.width, 1.5 / blurB.height);
+      renderer.setRenderTarget(blurB);
+      renderer.render(blurScene, postCam);
+      renderer.setRenderTarget(null);
+      renderer.render(dofScene, postCam);
+    } else {
+      renderer.setRenderTarget(null);
+      renderer.render(scene, camera);
+    }
   }
 }
 animate();
@@ -1575,4 +2052,5 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  sizeDofTargets();
 });
