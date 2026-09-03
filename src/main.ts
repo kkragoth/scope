@@ -924,7 +924,6 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 imageShift = -sightC;
       vec2 imageCenter = sightC;
       vec2 reticleCenter = sightC * uParallaxSens;
-      vec2 tubeCenter = -uEyeOffset * 0.3;
 
       // ---- 3D FORESHORTENING: tilted tube projects as an ellipse ----
       // viewAngle = combined eye-offset + bore/eye angular mismatch (radians).
@@ -947,18 +946,20 @@ const lensMat = new THREE.ShaderMaterial({
       // crescent, and the full picture only lands at the end of ADS — like
       // finding the eye box on a real optic. Do NOT linearize this.
       float eyeBox = smoothstep(0.15, 0.98, uAdsWeight);
-      // exit-pupil FOV penalty grows with relief error AND magnification:
-      // reliefShrink handles "too far", tooClose handles "inside the pupil".
+      // Exit-pupil aperture: symmetric bell peaked at relief 1.0, falling off
+      // both ways — too far shrinks the exit-pupil disc below the eye pupil
+      // (narrower FOV), too close defocuses and tightens the effective pupil.
+      // One smooth physical term replaces the old reliefShrink * tooClose
+      // product (two near-cancelling fudge curves multiplied together).
       float reliefErr = abs(uEyeRelief - 1.0);
-      float reliefShrink = clamp(pow(max(uEyeRelief, 0.35), -1.15), 0.18, 1.05);
-      float tooClose = smoothstep(0.35, 0.78, uEyeRelief);
+      float pupilAperture = 1.0 / (1.0 + reliefErr * reliefErr * 1.6);
       // NOTE: no base-aperture zoom penalty. A perfectly seated eye sees the
       // FULL field through the ocular at any magnification — the picture must
       // stay full-size and full-bright when you're still. The zoom penalty
       // lives in the *error response* (uEyeOffset/uEyeRelief are amplified by
       // zoomTighten in JS), so it only bites when you sway, never when centered.
-      float currentAperture = uVignetteSize * reliefShrink * tooClose * mix(0.35, 1.0, eyeBox);
-      float shadowK = uShadowHardness * mix(1.7, 0.75, tooClose * clamp(2.0 - uEyeRelief, 0.0, 1.0));
+      float currentAperture = uVignetteSize * pupilAperture * mix(0.35, 1.0, eyeBox);
+      float shadowK = uShadowHardness * mix(1.7, 0.75, clamp(2.0 - uEyeRelief, 0.0, 1.0));
       // zoomed glass punishes harder: edge hardens with magnification
       shadowK *= 1.0 + (uZoomK - 1.0) * 0.25;
       // edge stays hard while shouldering, relaxes once seated in the eye box
@@ -1172,20 +1173,31 @@ const lensMat = new THREE.ShaderMaterial({
         * clamp((uZoomK - 1.0) * 0.5, 0.0, 1.0)
         * smoothstep(0.3, 0.9, uAdsWeight);
 
-      // ---- 3D TUNNEL: matte-black baffled tube + edge crescent + rim glint ----
+      // ---- 3D TUNNEL (perspective bore) ----
+      // Model the tube interior as a cone: the ocular rim (near, large) pinned
+      // to the sight-picture edge, and the objective/field-stop (far, smaller,
+      // deeper parallax) at the other end. A real scope seen through the ocular
+      // is nearly orthographic, so the "3D" reads from three stacked cues:
+      //   1. the far opening is visibly SMALLER than the near opening,
+      //   2. the far rim's center slides MORE with the eye (deeper parallax),
+      //   3. baffle rings are spaced in DEPTH (converging), not screen radius.
       // Hip reads as ~95% ocular shadow (tiny dim tilted peephole) by design —
       // currentAperture/etchVis/reliefDim above already encode that. Do NOT
       // "fix" the hip floor back up: a usable full-bright picture off-axis is
       // exactly what looked awful.
-      float distImg = ellR(uv, imageCenter, tiltDir, tiltCos);
-      float distTube = ellR(uv, tubeCenter, tiltDir, tiltCos);
-      float distOcular = length(uv);
+      vec2 nearC = imageCenter;
+      float nearR = currentAperture;
+      vec2 farC = imageCenter - uEyeOffset * 0.55;
+      float farR = currentAperture * 0.82;
 
-      float objectiveMask = smoothstep(currentAperture - shadowK, currentAperture, distImg);
+      float distImg = ellR(uv, nearC, tiltDir, tiltCos);
+      float distOcular = length(uv);
+      float dFar = ellR(uv, farC, tiltDir, tiltCos);
+
+      float objectiveMask = smoothstep(nearR - shadowK, nearR, distImg);
 
       // Directional eye-box shadow: blackout creeps in from the side the eye
-      // drifts toward (not a uniform radial close). Scales with eye error so
-      // a centered eye sees a clean full picture. The blackout edge is the
+      // drifts toward (not a uniform radial close). The blackout edge is the
       // arc of the eye's entrance pupil sliding against the field stop — a
       // lune/crescent (elliptical under tube tilt), NOT a straight cutoff.
       {
@@ -1195,114 +1207,80 @@ const lensMat = new THREE.ShaderMaterial({
         // only where it overlaps the objective field stop. Off-axis the two
         // discs part into a crescent.
         float slide = min(eyeMag * 2.0, 0.8);
-        vec2 pupilC = imageCenter - eyeDir * currentAperture * slide;
+        vec2 pupilC = nearC - eyeDir * nearR * slide;
         // Eye pupil is ~the same size as the field stop: sliding it yields ONE
         // crescent (a lens bounded by two equal arcs) that reads as a single
         // kidney-bean, not two separate circles. Slide is capped so the arc
         // never flattens into a straight chord at saturated sway.
-        float pupilR = currentAperture * 0.98;
+        float pupilR = nearR * 0.98;
         float pupilMask = smoothstep(pupilR - shadowK, pupilR, ellR(uv, pupilC, tiltDir, tiltCos));
         objectiveMask = max(objectiveMask, pupilMask * smoothstep(0.008, 0.10, eyeMag));
       }
 
-      // Tube interior is matte black (baffled — it never catches direct sun).
-      // Only a faint warm kiss on the outer wall band, scaled by sunFacing so
-      // it dies completely when looking away from the sun.
-      vec2 tubeN = distTube > 1e-4 ? (uv - tubeCenter) / distTube : vec2(0.0, 1.0);
+      // Depth along the bore: solve f(t) = ellR(uv, lerp(nearC,farC,t)) -
+      // lerp(nearR,farR,t) = 0. f is ~linear in t for the small center slide,
+      // so one linear solve is enough to index the wall from ocular (0) to
+      // objective (1).
+      float f0 = distImg - nearR;
+      float f1 = dFar - farR;
+      float depth = clamp(f0 / max(f0 - f1, 1e-4), 0.0, 1.0);
+
+      vec2 wallC = mix(nearC, farC, depth);
+      vec2 tubeN = length(uv - wallC) > 1e-4 ? normalize(uv - wallC) : vec2(0.0, 1.0);
       vec2 sunN = length(uSunSide) > 1e-4 ? normalize(uSunSide) : vec2(0.4, 0.65);
-      float wallBand = smoothstep(currentAperture, 0.5, distTube);
+      vec2 eyeDirT = swayDist > 1e-4 ? uEyeOffset / swayDist : vec2(0.0);
+
+      // Matte anodized base; sun-side kiss only (a baffled tube never catches
+      // direct sun head-on), scaled by sunFacing so it dies facing away.
       float sunSideLight = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 4.0);
       vec3 tubeWall = vec3(0.008, 0.008, 0.008)
-        + vec3(0.10, 0.088, 0.075) * (wallBand * wallBand) * sunSideLight * uSunFacing * 0.25;
-      // FAR INNER WALL: looking down a pipe off-axis, the opposite wall shows
-      // itself — a soft band on the far side that travels with the eye. This
-      // is the strongest "hollow tube" cue; it needs no sun (ambient bounce).
-      {
-        float eyeMag2 = length(uEyeOffset);
-        vec2 eyeDir2 = eyeMag2 > 1e-4 ? uEyeOffset / eyeMag2 : vec2(0.0);
-        float farSide = pow(max(dot(tubeN, -eyeDir2) * 0.5 + 0.5, 0.0), 3.0);
-        float midWall = wallBand * (1.0 - wallBand) * 4.0;
-        tubeWall += vec3(0.10, 0.095, 0.09) * farSide * midWall
-          * (0.10 + min(eyeMag2 * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
-      }
-      // thin objective-bell crescent right at the image edge, sun side only
-      // (widens under ring-DOF like the rest of the glass furniture)
-      float crescentLine = 1.0 - smoothstep(0.0, 0.022 + outerSoft * 0.02, abs(distTube - currentAperture));
-      float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-      tubeWall += vec3(1.0, 0.94, 0.84) * crescent * uSunFacing * 0.12 * objectiveMask;
+        + vec3(0.10, 0.088, 0.075) * sunSideLight * uSunFacing * 0.22;
 
-      // faint travelling sheen with sway (oily glass edge, not lit paint)
-      float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.35;
-      tubeWall += vec3(0.09, 0.09, 0.09) * innerRefl * objectiveMask;
+      // FAR WALL (the hollow-tube cue): off-axis, the wall opposite the eye's
+      // offset turns edge-on and catches ambient light. Directional, not radial
+      // — this is what makes the bore read as a real cylinder you're inside.
+      float farWall = pow(max(dot(tubeN, -eyeDirT) * 0.5 + 0.5, 0.0), 3.0);
+      tubeWall += vec3(0.11, 0.105, 0.095) * farWall
+        * (0.08 + min(swayDist * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
 
-      // Machined baffle ridges: concentric rings darken the wall in bands and
-      // catch a hairline highlight on the sun side at glancing angles.
-      // transitBoost: looking down the tube at an angle mid-shoulder, the
-      // rings catch light and read as depth — once seated they go near-black.
-      // Chirped spacing (rings bunch toward the far end) fakes pipe
-      // perspective — even spacing reads flat, bunching reads deep.
+      // TRUE FRESNEL on the cylindrical wall: reflection peaks at grazing angle,
+      // which for a near-orthographic eye is the far wall (edge-on). Rolls with
+      // the sun and decays as the wall recedes toward the objective — the
+      // "looking down a glass tube" sheen, distinct from the matte baffles.
+      float fresnel = pow(farWall, 1.6) * (0.04 + 0.20 * uSunIntensity);
+      float frSun = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
+      tubeWall += vec3(0.13, 0.16, 0.19) * fresnel * (0.35 + 0.65 * frSun);
+
+      // Baffle ridges at fixed DEPTH: chirped so they bunch toward the objective
+      // (perspective convergence) instead of the old radial sine that shimmered
+      // like a flat moiré. transitBoost lights them mid-shoulder and at zoom.
       float transitBoost = (1.0 + transit * 1.2) * (1.0 + (uZoomK - 1.0) * 0.3);
-      float baffles = 0.5 + 0.5 * sin(distTube * (200.0 + distTube * 160.0));
+      float baffles = 0.5 + 0.5 * sin((depth + depth * depth * 0.6) * 26.0 * 6.2831853);
       baffles = mix(baffles, 0.5, outerSoft * 0.8);
-      tubeWall *= (0.78 + 0.22 * baffles);
-      // depth falloff: the far end of the tunnel falls darker (tube length read)
-      tubeWall *= mix(1.0, 0.55, smoothstep(currentAperture, 0.5, distTube));
-      // atmospheric depth haze: the deep (objective) end picks up a faint cool
-      // scatter off the black anodizing, so the bore reads as a receding volume
-      // instead of a flat ring — the haze is strongest at the far lip and dies
-      // toward the ocular.
-      tubeWall += vec3(0.02, 0.026, 0.035)
-        * (1.0 - wallBand) * (1.0 - wallBand) * (0.3 + 0.5 * uSunIntensity);
-      tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask * transitBoost;
+      tubeWall *= (0.80 + 0.20 * baffles);
+      // Depth falloff: the objective end falls darker (the tube's length reads).
+      tubeWall *= mix(1.0, 0.55, depth);
+      // Atmospheric depth haze: cool scatter at the deep end, strongest at the
+      // far lip, dying toward the ocular — the bore reads as a receding volume.
+      tubeWall += vec3(0.02, 0.026, 0.035) * (1.0 - depth) * (0.3 + 0.5 * uSunIntensity);
+      // Sun catches the machined ridge crests at glancing angles.
+      tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * transitBoost;
 
-      // ---- INNER OBJECTIVE RING (second glass layer, depth parallax) ----
-      // A real scope is a stack of elements, not one flat screen: the objective
-      // lens sits deep in the bell behind the field stop. Drawing it as a ring
-      // that shifts at a *different* parallax rate than the ocular rim and the
-      // image gives three planes sliding against each other — that relative
-      // motion is what reads as a hollow 3D tube instead of a painted washer.
-      {
-        vec2 innerC = -uEyeOffset * 0.55;
-        float innerR = currentAperture * 1.05 + outerSoft * 0.01;
-        float ir = ellR(uv, innerC, tiltDir, tiltCos);
-        float innerRing = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.012, abs(ir - innerR));
-        vec2 innerN = normalize(uv - innerC + vec2(1e-4));
-        float innerSun = pow(max(dot(innerN, sunN) * 0.5 + 0.5, 0.0), 4.0);
-        tubeWall += vec3(0.12, 0.115, 0.11) * innerRing
-          * (0.14 + 0.4 * innerSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
-        // objective glass catches a faint blue sky kiss, like coated glass
-        tubeWall += vec3(0.08, 0.10, 0.12) * innerRing * (1.0 - objectiveMask)
-          * (0.05 + 0.16 * uSunIntensity);
-      }
+      // Objective-bell crescent: thin bright lip right where the wall meets the
+      // sight picture, sun side only (the machined edge of the objective glass).
+      float crescentLine = 1.0 - smoothstep(0.0, 0.022 + outerSoft * 0.02, abs(distImg - nearR));
+      float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
+      tubeWall += vec3(1.0, 0.94, 0.84) * crescent * uSunFacing * 0.12;
 
-      // ---- ERECTOR RING (third glass layer) ----
-      // The erector tube is the narrow internal cylinder between the objective
-      // and ocular. Its near lip is a THIRD ring at its own parallax rate —
-      // shallower than the objective (shifts less) but deeper than the ocular
-      // (shifts more), so off-axis the rings slide at three distinct speeds and
-      // the interior reads as a real receding bore, not concentric paint.
-      {
-        vec2 erC = -uEyeOffset * 0.45;
-        float erR = mix(currentAperture, 0.485, 0.34);
-        float er = ellR(uv, erC, tiltDir, tiltCos);
-        float erRing = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.01, abs(er - erR));
-        vec2 erN = normalize(uv - erC + vec2(1e-4));
-        float erSun = pow(max(dot(erN, sunN) * 0.5 + 0.5, 0.0), 3.0);
-        tubeWall += vec3(0.09, 0.088, 0.085) * erRing
-          * (0.08 + 0.28 * erSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
-      }
+      // Oily travelling sheen with sway (grazing glass edge, not lit paint).
+      float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.35;
+      tubeWall += vec3(0.09, 0.09, 0.09) * innerRefl;
 
-      // Tube inner-surface fresnel: the wall is glass, so it reflects a whisper
-      // of the world at grazing angles near the ocular — bright rim, black
-      // center. This is the "looking down a glass tube" sheen, distinct from
-      // the matte baffles; it rolls with the sun and the eye.
-      {
-        float grazing = pow(1.0 - clamp(distTube / 0.5, 0.0, 1.0), 1.6);
-        float wallFres = grazing * (0.03 + 0.18 * uSunIntensity);
-        vec2 frN = normalize(uv - tubeCenter + vec2(1e-4));
-        float frSun = pow(max(dot(frN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-        tubeWall += vec3(0.13, 0.16, 0.19) * wallFres * (0.3 + 0.7 * frSun) * (1.0 - objectiveMask);
-      }
+      // Objective glass (far rim) catches a faint coated-glass sky kiss where it
+      // pokes out from behind the sight picture off-axis.
+      float objLip = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.012, abs(dFar - farR));
+      tubeWall += vec3(0.10, 0.115, 0.125) * objLip
+        * (0.10 + 0.30 * uSunIntensity) * (0.4 + 0.6 * etchVis);
 
       // ---- LAYERED GLASS (subtle, near-neutral) ----
       // A scope is a stack of coated elements; each reflects a LITTLE. Keep
