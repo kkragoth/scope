@@ -395,11 +395,14 @@ const lensGeo = new THREE.CircleGeometry(tubeRadius - 0.0005, 64);
 const lensMat = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: scopeTarget.texture },
-    uAberration: { value: 0.03 },
+    uAberration: { value: 0.008 },
     uVignetteSize: { value: 0.485 },
     uShadowHardness: { value: 0.06 },
     uParallaxSens: { value: 4.5 },
     uEyeOffset: { value: new THREE.Vector2(0, 0) },
+    uEyeRelief: { value: 1.0 },
+    uReticleRoll: { value: 0.0 },
+    uViewAngle: { value: new THREE.Vector2(0, 0) },
     uAdsWeight: { value: 0.0 },
     uTime: { value: 0.0 },
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
@@ -426,6 +429,9 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uShadowHardness;
     uniform float uParallaxSens;
     uniform vec2 uEyeOffset;
+    uniform float uEyeRelief;
+    uniform float uReticleRoll;
+    uniform vec2 uViewAngle;
     uniform float uAdsWeight;
     uniform float uTime;
     uniform vec2 uSunSide;
@@ -470,6 +476,15 @@ const lensMat = new THREE.ShaderMaterial({
       float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
       return length(pa - ba * h);
     }
+    // Elliptical radius of q around center c given tilt basis (dir/cos):
+    // parallel axis is foreshortened by tiltCos, so stretch it back before
+    // the circular comparison. Returns circular-equivalent radius.
+    float ellR(vec2 q, vec2 c, vec2 dir, float cosA) {
+      vec2 d = q - c;
+      float par = dot(d, dir);
+      vec2 perp = d - dir * par;
+      return length(vec2(par / max(cosA, 0.55), length(perp)));
+    }
 
     void main() {
       vec2 uv = vUv - 0.5;
@@ -481,8 +496,10 @@ const lensMat = new THREE.ShaderMaterial({
       // ---- TRUE PARALLAX: 3 depth planes ----
       // image plane drifts modestly with eye, reticle plane drifts hard opposite.
       // differential = parallax error (reticle vs point-of-impact).
+      // Relief modulates it: off-relief eyes get stronger parallax (real optics).
+      float reliefGain = clamp(0.75 + 0.25 * uEyeRelief, 0.7, 1.4);
       vec2 imageShift = uEyeOffset * 1.1;
-      vec2 reticleCenter = -uEyeOffset * uParallaxSens;
+      vec2 reticleCenter = -uEyeOffset * (uParallaxSens * reliefGain);
       float maxShift = uVignetteSize * 0.55;
       if (length(reticleCenter) > maxShift) {
         reticleCenter = normalize(reticleCenter) * maxShift;
@@ -490,15 +507,41 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 tubeCenter = -uEyeOffset * 0.55;
       vec2 imageCenter = -uEyeOffset * 1.0;
 
-      // Edge-only chromatic aberration: zero in center, ramps to rim.
-      // caMask stays 0 until very close in, then rises quadratically, and the
-      // resulting R/B split is a multiple of ir2 — so the rim (ir2 ~ 0.24)
-      // gets a bold ~7px fringe while the center stays perfectly clean.
-      float caMask = smoothstep(0.05, 0.4, distFromCenter);
-      caMask *= caMask;
-      float dynamicAberration = (uAberration + swayDist * 1.5) * caMask;
+      // ---- 3D FORESHORTENING: tilted tube projects as an ellipse ----
+      // viewAngle = combined eye-offset + bore/eye angular mismatch (radians).
+      // Circles viewed at angle squash along the tilt direction: minor axis
+      // lies along the offset, major stays perpendicular. Diagonal eye error
+      // therefore yields a diagonally-tilted ellipse (the "/" vs "\" feel).
+      float tiltMag = length(uViewAngle);
+      vec2 tiltDir = tiltMag > 1e-4 ? uViewAngle / tiltMag : vec2(1.0, 0.0);
+      float tiltCos = cos(min(tiltMag, 0.65));
 
-      float currentDistortion = mix(0.7, 0.05, uAdsWeight);
+      // ---- EYE-RELIEF APERTURE (computed early: reticle + dirt need it) ----
+      // relief 1.0 = optimal. Too far shrinks the picture (scope shadow closing
+      // in); too close blows it out past the ocular. Off-relief edges harden.
+      // Hip floor is a tiny dim peephole, NOT a usable sight (~95% shadowed,
+      // like real glass viewed 4 radii off-axis). Reticle fades out with it.
+      float reliefShrink = clamp(1.0 / sqrt(max(uEyeRelief, 0.35)), 0.55, 1.08);
+      float tooClose = smoothstep(0.35, 0.75, uEyeRelief);
+      float adsFloor = mix(0.45, 1.0, smoothstep(0.1, 0.8, uAdsWeight));
+      float currentAperture = max(uVignetteSize * reliefShrink * tooClose, uVignetteSize * 0.30 * adsFloor);
+      float shadowK = uShadowHardness * mix(1.6, 0.8, tooClose * clamp(2.0 - uEyeRelief, 0.0, 1.0));
+      // off-axis eyes stop seeing the etched reticle at all (real ocular shadow)
+      float etchVis = smoothstep(0.05, 0.7, uAdsWeight);
+      // off-axis transmission collapse: hip peephole runs dark, not full-bright
+      float reliefDim = mix(0.30, 1.0, smoothstep(0.0, 0.85, uAdsWeight));
+
+      // Subtle lateral CA: zero in center, gentle rim-only split (~2px at the
+      // rim at 1024). No sway blowup — sway already moves the whole image via
+      // parallax, multiplying the fringe on top looked cheap and shimmery.
+      float caMask = smoothstep(0.12, 0.45, distFromCenter);
+      caMask *= caMask;
+      float dynamicAberration = uAberration * (0.7 + swayDist * 0.6) * caMask;
+
+      // Mild pincushion-only distortion. The old 0.7 hip fisheye is what made
+      // the un-ADS view look awful — real ocular shadow is a blackout, not a
+      // funhouse mirror.
+      float currentDistortion = mix(0.12, 0.05, uAdsWeight);
 
       // Distort around the shifted image plane so glass feels volumetric.
       // Image stays UPRIGHT at hip by design (see debate below): a real scope's
@@ -518,9 +561,11 @@ const lensMat = new THREE.ShaderMaterial({
       float g = texture2D(tDiffuse, sampG + 0.5).g;
       float b = texture2D(tDiffuse, sampB + 0.5).b;
       vec3 sceneColor = vec3(r, g, b);
-      // Sight picture runs slightly darker than naked eye (coated glass
-      // transmission loss) — the rim falloff later deepens this to the edge.
-      sceneColor *= 0.9 * uGlassTint;
+      // Coated-glass transmission loss + off-axis dimming: ADS center runs
+      // ~78% of naked-eye brightness, hip peephole collapses toward 30%.
+      // (Deliberately under, not over — the old 0.9 + additive lifts read as
+      // a flashlight inside the tube.)
+      sceneColor *= 0.78 * reliefDim * uGlassTint;
 
       // ---- LENS SMUDGE & DIRT: ultra-subtle, glint-only ----
       // uDirtOpacity ~0.05 by default: effectively invisible unless sun catches it.
@@ -538,15 +583,15 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 safeUv = uv + vec2(1e-4);
       vec2 sweepDir = normalize(uSunSide + uEyeOffset * 4.0 + vec2(1e-4));
       float sweep = pow(max(dot(normalize(safeUv), sweepDir) * 0.5 + 0.5, 0.0), 6.0);
-      float dirtLightAmt = (0.004 + uSunIntensity * 0.05 + sweep * (0.02 + swayDist * 0.6)) * uDirtOpacity * 20.0;
-      dirtLightAmt = min(dirtLightAmt, 0.06);
+      float dirtLightAmt = (0.002 + uSunIntensity * 0.025 + sweep * (0.01 + swayDist * 0.3)) * uDirtOpacity * 20.0;
+      dirtLightAmt = min(dirtLightAmt, 0.03);
       vec3 dirtColor = vec3(1.0, 0.99, 0.96);
-      float inImage = 1.0 - smoothstep(uVignetteSize - uShadowHardness, uVignetteSize, length(uv - imageCenter));
+      float inImage = 1.0 - smoothstep(currentAperture - shadowK, currentAperture, ellR(uv, imageCenter, tiltDir, tiltCos));
       sceneColor += dirtMask * dirtLightAmt * dirtColor * inImage;
 
       // Diagonal sun-streak flare across glass (scope glint), barely-there
       float flareBand = 1.0 - smoothstep(0.0, 0.09, abs(dot(uv, vec2(-sweepDir.y, sweepDir.x))));
-      float flare = flareBand * sweep * uSunIntensity * 0.06 * inImage;
+      float flare = flareBand * sweep * uSunIntensity * 0.025 * inImage;
       sceneColor += flare * vec3(1.0, 0.99, 0.96);
 
       // ---- RETICLE: uOpticMode 0 = sniper mil-lines, 1 = ACOG / red dot ----
@@ -558,7 +603,15 @@ const lensMat = new THREE.ShaderMaterial({
       // FFP vs SFP: sniper reticle scales with magnification (first focal
       // plane — subtensions stay true at any zoom), ACOG stays fixed size
       // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
-      vec2 p = (uv - reticleCenter) / uReticleScale;
+      // RETICLE ROLL: the etch is fixed to the gun, the eye is fixed to the
+      // head. When the tube rolls relative to the eye the cross tilts "/" vs
+      // "\" while the rotationally-symmetric lens image stays level. Rotate
+      // eye-space coords back into gun-space by -roll to draw that.
+      vec2 rc = uv - reticleCenter;
+      float cR = cos(uReticleRoll);
+      float sR = sin(uReticleRoll);
+      vec2 rcGun = vec2(cR * rc.x + sR * rc.y, -sR * rc.x + cR * rc.y);
+      vec2 p = rcGun / uReticleScale;
       bool isAcog = uOpticMode > 0.5;
 
       // SNIPER etch: full thin mil cross + thick outer posts + mil dots
@@ -600,18 +653,18 @@ const lensMat = new THREE.ShaderMaterial({
       // bloom: tight halo in dark environments (battery bleed)
       // ACOG dot blooms wider than the sniper chevron on purpose.
       float haloDist = isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev;
-      float halo = exp(-haloDist * 90.0) * 0.55 + exp(-length(p) * 22.0) * 0.12;
+      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(p) * 22.0) * 0.08;
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
 
-      float reticleVis = 1.0 - smoothstep(uVignetteSize - uShadowHardness, uVignetteSize, length(uv - imageCenter));
+      float reticleVis = (1.0 - smoothstep(currentAperture - shadowK, currentAperture, ellR(uv, imageCenter, tiltDir, tiltCos))) * etchVis;
       sceneColor = mix(sceneColor, vec3(0.0), etchedMask * 0.82 * reticleVis);
       // illuminated chevron sits on top of etch
       sceneColor += uReticleColor * illumMask * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
       // battery bleed: tight faint wash that never blooms with glowStrength
       // (decoupling it is what keeps the sight picture from lifting)
-      float wash = (exp(-haloDist * 140.0) * 0.30 + 0.002) * (0.5 + darkFactor * 0.8) * uBattery;
+      float wash = (exp(-haloDist * 140.0) * 0.22 + 0.0008) * (0.5 + darkFactor * 0.8) * uBattery;
       sceneColor += uReticleColor * wash * reticleVis;
 
       // ---- GLASS GRIT: dust motes + one fiber, fixed to the ocular surface
@@ -632,34 +685,34 @@ const lensMat = new THREE.ShaderMaterial({
       {
         vec2 gSun = length(uSunSide) > 1e-4 ? normalize(uSunSide) : vec2(0.4, 0.65);
         float glare = uSunFacing * uSunFacing * uSunFacing;
-        sceneColor += vec3(1.0, 0.96, 0.90) * glare * 0.035 * reticleVis;
+        sceneColor += vec3(1.0, 0.96, 0.90) * glare * 0.018 * reticleVis;
         // faint cool ghost orb, mirrored opposite the sun side
         vec2 gPos = -gSun * 0.16 + imageCenter;
         float ghost = 1.0 - smoothstep(0.0, 0.045, length(uv - gPos));
-        sceneColor += vec3(0.85, 0.92, 1.0) * ghost * glare * uSunFacing * 0.05 * reticleVis;
+        sceneColor += vec3(0.85, 0.92, 1.0) * ghost * glare * uSunFacing * 0.03 * reticleVis;
       }
 
       // ---- 3D TUNNEL: matte-black baffled tube + edge crescent + rim glint ----
-      // NOTE (gameplay, NOT realism — DO NOT "fix" to a smaller value):
-      // a real scope at hip / off eye-relief would be ~80%+ black. We keep the
-      // hip aperture at ~50% diameter so the player still sees the sight
-      // picture when not aiming down sights.
-      float currentAperture = mix(uVignetteSize * 0.5, uVignetteSize, smoothstep(0.1, 0.8, uAdsWeight));
-      float distImg = length(uv - imageCenter);
-      float distTube = length(uv - tubeCenter);
+      // Hip reads as ~95% ocular shadow (tiny dim tilted peephole) by design —
+      // currentAperture/etchVis/reliefDim above already encode that. Do NOT
+      // "fix" the hip floor back up: a usable full-bright picture off-axis is
+      // exactly what looked awful.
+      float distImg = ellR(uv, imageCenter, tiltDir, tiltCos);
+      float distTube = ellR(uv, tubeCenter, tiltDir, tiltCos);
       float distOcular = length(uv);
 
-      float objectiveMask = smoothstep(currentAperture - uShadowHardness, currentAperture, distImg);
+      float objectiveMask = smoothstep(currentAperture - shadowK, currentAperture, distImg);
 
       // Directional eye-box shadow: blackout creeps in from the side the eye
       // drifts toward (not a uniform radial close). Scales with eye error so
-      // a centered eye sees a clean full picture.
+      // a centered eye sees a clean full picture. Evaluated in the same
+      // elliptical metric as the aperture so the crescent follows the tilt.
       {
         float eyeMag = length(uEyeOffset);
         vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
         float sideProj = dot(uv - tubeCenter, eyeDir);
         float crescentEdge = currentAperture * (1.0 - eyeMag * 2.4);
-        float eyeShadow = smoothstep(crescentEdge - uShadowHardness, crescentEdge, sideProj)
+        float eyeShadow = smoothstep(crescentEdge - shadowK, crescentEdge, sideProj)
           * smoothstep(0.02, 0.12, eyeMag);
         objectiveMask = max(objectiveMask, eyeShadow);
       }
@@ -691,7 +744,7 @@ const lensMat = new THREE.ShaderMaterial({
       // Lens-coating sheen (MgF2-style): faint magenta/green shift that only
       // exists near the rim and swings hue with the sun side. Dies head-on.
       {
-        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.16;
+        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.2 + 0.8 * uSunIntensity) * 0.08;
         vec3 coat = mix(vec3(1.0, 0.35, 0.9), vec3(0.35, 1.0, 0.55), 0.5 + 0.5 * dot(tubeN, sunN));
         sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
       }
@@ -711,10 +764,10 @@ const lensMat = new THREE.ShaderMaterial({
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
-      // Sight-picture brightness: neutral-to-dim center, real falloff on the
-      // outside of the circle toward the rim. Never lift the image.
+      // Sight-picture brightness: dim center (transmission loss, above), real
+      // falloff toward the rim. Never lift the image.
       float brightT = smoothstep(0.0, uVignetteSize, length(uv - imageCenter));
-      finalColor *= mix(1.0, 0.85, brightT);
+      finalColor *= mix(1.0, 0.62, brightT);
 
       // faint grain for tactical grit (not in the black tunnel)
       float grain = hash21(vUv * 913.0 + fract(uTime) * 7.0) - 0.5;
@@ -862,6 +915,13 @@ const _scopeRight = new THREE.Vector3();
 const _scopeUp = new THREE.Vector3();
 const _sunSide = new THREE.Vector2();
 const _scopeQuat = new THREE.Quaternion();
+const _eyeWorld = new THREE.Vector3();
+const _eyeLocal = new THREE.Vector3();
+const _eyeQuat = new THREE.Quaternion();
+const _relQuat = new THREE.Quaternion();
+const _relEuler = new THREE.Euler();
+const _viewAngle = new THREE.Vector2();
+let headLean = 0.0;
 // Sun occlusion test (1 = visible, 0 = blocked; smoothed per-frame)
 const sunRay = new THREE.Raycaster();
 sunRay.far = 800;
@@ -895,6 +955,23 @@ function animate(): void {
     currentAdsWeight += (targetWeight - currentAdsWeight) * 15.0 * delta;
     weaponGroup.position.lerpVectors(hipPosition, adsPosition, currentAdsWeight);
 
+    // EYE-RELIEF BREATHING + WALK BOB: longitudinal micro-motion of the gun
+    // relative to the eye. At ADS this is ±2-3mm (stays inside the eye box);
+    // at hip it is ~4x larger. This is what makes relief a live axis instead
+    // of a static ADS/hip lerp.
+    {
+      const bobScale = THREE.MathUtils.lerp(1.0, 0.25, currentAdsWeight);
+      const moving = (keys.w || keys.a || keys.s || keys.d) ? 1.0 : 0.0;
+      const walkPh = time * 9.0;
+      weaponGroup.position.x +=
+        (Math.sin(walkPh * 0.5) * 0.004 * moving + Math.sin(time * 1.7) * 0.0015) * bobScale;
+      weaponGroup.position.y +=
+        (Math.abs(Math.cos(walkPh * 0.5)) * 0.005 * moving + Math.sin(time * 2.3) * 0.0012) * bobScale;
+      // longitudinal: breathing + footstep thump drive relief in/out
+      weaponGroup.position.z +=
+        (Math.sin(time * 1.1) * 0.003 + Math.sin(walkPh) * 0.002 * moving) * bobScale;
+    }
+
     lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
 
     const springForce = isAiming ? 20.0 : 5.0;
@@ -902,6 +979,21 @@ function animate(): void {
     mouseVelocityY = THREE.MathUtils.lerp(mouseVelocityY, 0, springForce * delta);
     mouseVelocityX = THREE.MathUtils.clamp(mouseVelocityX, -0.25, 0.25);
     mouseVelocityY = THREE.MathUtils.clamp(mouseVelocityY, -0.25, 0.25);
+
+    // HEAD LEAN (all 3 planes): strafe + lateral flick rolls the HEAD, so the
+    // whole world (inside and outside the scope) tilts together. The weapon
+    // adds its own EXTRA roll on top (below) — the difference between the two
+    // is what tilts the reticle "/" vs "\" against a level-corrected image.
+    {
+      const strafe = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+      const leanTarget = THREE.MathUtils.clamp(
+        -strafe * 0.028 - mouseVelocityX * 0.12,
+        -0.06,
+        0.06,
+      );
+      headLean += (leanTarget - headLean) * Math.min(1, 8 * delta);
+      pitchObject.rotation.z = headLean;
+    }
 
     const swayMultiplier = isAiming ? 0.001 : 0.015;
     const breathX = Math.sin(time * 2.0) * swayMultiplier;
@@ -915,14 +1007,65 @@ function animate(): void {
     weaponGroup.rotation.x = -mouseVelocityY + breathY;
     weaponGroup.rotation.z = baseRotZ - mouseVelocityX * 0.5;
 
-    // 3D PLANAR ROLL: Counter-roll the scope camera relative to the weapon sway.
-    // This makes the world rotate inside the lens when you move the mouse horizontally.
+    // SCOPE IMAGE STAYS LEVEL WHILE THE RETICLE ROLLS: the objective lenses
+    // are rotationally symmetric, so rolling the tube around its own optical
+    // axis must NOT rotate the world image — only the etched reticle (drawn
+    // in the shader, rotated by uReticleRoll) tilts with the gun. Counter-
+    // rolling the render camera here cancels the weapon-relative roll while
+    // preserving head lean from pitchObject, so horizon "/" vs "\" comes
+    // from the head and the cross "/" vs "\" comes from the gun. Correct on
+    // all 3 planes: pitch/yaw flow through from the barrel, roll does not.
     scopeCamera.rotation.z = -weaponGroup.rotation.z;
 
-    (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).set(
-      -mouseVelocityX,
-      mouseVelocityY,
-    );
+    // ---- TRUE 3D EYE VECTOR: where is the eye in tube space? ----
+    // eyeLocal = camera world pos expressed in weaponGroup (tube) frame.
+    // x/y = lateral error (radii), z = distance behind tube origin. This
+    // single vector captures hip offset, ADS alignment, sway rotations, bob
+    // and breathing with correct 3-plane coupling — no hand-tuned 2D fake.
+    {
+      // matrices must be fresh: rotations/positions above changed this frame
+      pitchObject.updateWorldMatrix(true, true);
+      camera.getWorldPosition(_eyeWorld);
+      _eyeLocal.copy(_eyeWorld);
+      weaponGroup.worldToLocal(_eyeLocal);
+      const isAcog = (lensMat.uniforms.uOpticMode.value as number) > 0.5;
+      const tubeR = isAcog ? 0.0355 : tubeRadius;
+      const ocularZ = isAcog ? 0.14 : 0.235;
+      const optRelief = isAcog ? 0.24 : 0.145; // ADS eye-to-ocular distance
+      const reliefDist = Math.max(_eyeLocal.z - ocularZ, 0.02);
+      const relief = THREE.MathUtils.clamp(reliefDist / optRelief, 0.35, 3.0);
+
+      // Gameplay soft knee: true hip error is ~4 radii (fully black real glass).
+      // tanh compresses it so the eye vector stays finite; the shader then
+      // closes the aperture to a tiny dim peephole and hides the reticle.
+      const rawX = _eyeLocal.x / tubeR;
+      const rawY = _eyeLocal.y / tubeR;
+      const softX = Math.tanh(rawX * 0.6) * 0.5;
+      const softY = Math.tanh(rawY * 0.6) * 0.5;
+      const eyeU = THREE.MathUtils.clamp(softX * 0.55, -0.3, 0.3);
+      const eyeV = THREE.MathUtils.clamp(softY * 0.55, -0.3, 0.3);
+      (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).set(eyeU, eyeV);
+      lensMat.uniforms.uEyeRelief.value = relief;
+
+      // View angle = geometric eye direction + bore/eye angular mismatch.
+      // eyeDir gives the positional component (ex/ez), relEuler the angular
+      // component (tube tilted under a steady eye). Summed they orient the
+      // foreshortening ellipse, including diagonal "/" vs "\" tilts.
+      weaponGroup.getWorldQuaternion(_scopeQuat);
+      camera.getWorldQuaternion(_eyeQuat);
+      _relQuat.copy(_scopeQuat).invert().multiply(_eyeQuat);
+      _relEuler.setFromQuaternion(_relQuat, 'XYZ');
+      const eyeAngX = Math.atan2(_eyeLocal.x, Math.max(reliefDist, 1e-3));
+      const eyeAngY = Math.atan2(_eyeLocal.y, Math.max(reliefDist, 1e-3));
+      _viewAngle.set(
+        THREE.MathUtils.clamp(eyeAngX * 0.9 + _relEuler.y, -0.65, 0.65),
+        THREE.MathUtils.clamp(eyeAngY * 0.9 - _relEuler.x, -0.65, 0.65),
+      );
+      (lensMat.uniforms.uViewAngle.value as THREE.Vector2).copy(_viewAngle);
+
+      // Reticle roll = weapon-relative roll (gun fixed etch vs head fixed eye)
+      lensMat.uniforms.uReticleRoll.value = weaponGroup.rotation.z;
+    }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
     // FFP sniper reticle follows magnification, ACOG stays fixed (SFP).
@@ -963,18 +1106,22 @@ function animate(): void {
     (sunSprite.material as THREE.SpriteMaterial).opacity = 0.8 * sunVis;
 
     // ---- TRUE PARALLAX ERROR for gameplay ----
-    // Matches shader: reticleCenter(-eye*sens, clamped) vs imageCenter(-eye*1.0).
-    // Difference = apparent reticle drift off the true point of impact.
+    // Matches shader: reticleCenter(-eye*sens*reliefGain, clamped) vs
+    // imageCenter(-eye*1.0). Difference = apparent reticle drift off POI.
     {
-      const ex = -mouseVelocityX * -1;
       const eye = lensMat.uniforms.uEyeOffset.value as THREE.Vector2;
-      const sens = lensMat.uniforms.uParallaxSens.value as number;
+      const sens =
+        (lensMat.uniforms.uParallaxSens.value as number) *
+        THREE.MathUtils.clamp(
+          0.75 + 0.25 * (lensMat.uniforms.uEyeRelief.value as number),
+          0.7,
+          1.4,
+        );
       const rx = THREE.MathUtils.clamp(-eye.x * sens, -0.267, 0.267);
       const ry = THREE.MathUtils.clamp(-eye.y * sens, -0.267, 0.267);
       const ix = -eye.x * 1.0;
       const iy = -eye.y * 1.0;
       parallaxError.set(rx - ix, ry - iy);
-      void ex;
     }
 
     // Sun glow sits at fixed distance along SUN_DIR from the main camera
