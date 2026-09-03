@@ -1505,6 +1505,14 @@ const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
 weaponGroup.position.copy(hipPosition);
 
+// Right-eye ADS (K): the scope sits on the right side of the screen, like a
+// rifle held in front of the dominant right eye. Implemented as a geometric
+// lateral offset PLUS a counter-yaw (see animate()) so the eye stays ON the
+// tube axis — a bare sideways shift would read as eye error and the eye-box
+// shadow would swallow the sight picture.
+let rightEye = true;
+const ADS_X_RIGHT = 0.05;
+
 let currentAdsWeight = 0.0;
 let mouseVelocityX = 0;
 let mouseVelocityY = 0;
@@ -1641,6 +1649,11 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     lensMat.uniforms.uDofRings.value = dofRings ? 1.0 : 0.0;
     (document.getElementById('dofstate') as HTMLParagraphElement).textContent =
       `Glass DOF: ${dofRings ? 'ON' : 'OFF'} — T to toggle`;
+  }
+  if (k === 'k') {
+    rightEye = !rightEye;
+    (document.getElementById('eyestate') as HTMLParagraphElement).textContent =
+      `Sight: ${rightEye ? 'RIGHT-EYE' : 'CENTERED'} — K to toggle`;
   }
   if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
@@ -1841,6 +1854,9 @@ function animate(): void {
 
     // WHOLE-WEAPON TARGETS: anchor follows intent; sway offsets ride along.
     const targetWeight = isAiming ? 1.0 : 0.0;
+    // K-toggle: ADS anchor slides right for the right-eye stance. Hip never
+    // moves — this only affects the shouldered position.
+    adsPosition.x = rightEye ? ADS_X_RIGHT : 0.0;
     _anchor.lerpVectors(hipPosition, adsPosition, targetWeight);
 
     const holdRate = breathHeld ? 5.0 : 3.0;
@@ -1939,7 +1955,16 @@ function animate(): void {
     // position chases (anchor + bob + drift). Slightly underdamped, so the
     // shoulder lands with mass and a breath of overshoot instead of on rails.
     // ADS weight is DERIVED from where the gun is — glass follows physics.
-    const baseRotY = THREE.MathUtils.lerp(0.15, 0.0, targetWeight);
+    // Right-eye counter-yaw: rotate the tube so its rear (+Z) axis passes
+    // through the eye (camera at pitchObject x ≈ 0). theta = -atan(x/depth):
+    // a bare 50mm sideways shift would leave the eye ~1 tube-radius off-axis
+    // and the eye-box crescent would close the lens. On-axis the shader sees
+    // uEyeOffset ≈ 0 / uEyeRelief ≈ 1, so the sight picture stays full-bright
+    // and the scopeCamera (a tube child) shows the world region the scope
+    // actually covers — no content mismatch, just a slight foreshortening
+    // tilt from the ~7.5° viewing angle, like a real offset optic.
+    const yawAds = rightEye ? -Math.atan2(adsPosition.x, -adsPosition.z) : 0.0;
+    const baseRotY = THREE.MathUtils.lerp(0.15, yawAds, targetWeight);
     const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
     {
       // Mouse lag is the eye-relief driver: the cheek weld tracks the head
