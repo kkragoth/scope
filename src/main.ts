@@ -852,10 +852,15 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 perp = d - dir * par;
       return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
-    // Chromatic sample at one bent coord (CA splits R/B around it).
-    vec3 sampleSight(vec2 buv, float br2v, float aberr) {
-      vec2 sR = buv * (1.0 - aberr * br2v);
-      vec2 sB = buv * (1.0 + aberr * br2v);
+    // Chromatic sample at one bent coord. Transverse CA: R/B bend linearly
+    // with radius (real lateral color scales ~r, not r^2) — the fringe is
+    // invisible at center and grows to a couple px at the rim. 'axial' adds a
+    // longitudinal component that bows with defocus (blue focuses short, red
+    // long), so off-focus edges smear magenta/green like real glass.
+    vec3 sampleSight(vec2 buv, float brv, float aberr, float axial) {
+      float k = aberr * brv + axial * brv * brv;
+      vec2 sR = buv * (1.0 - k);
+      vec2 sB = buv * (1.0 + k);
       float rr = texture2D(tDiffuse, sR + 0.5).r;
       float gg = texture2D(tDiffuse, buv + 0.5).g;
       float bb = texture2D(tDiffuse, sB + 0.5).b;
@@ -885,18 +890,19 @@ const lensMat = new THREE.ShaderMaterial({
       float swayDist = length(uEyeOffset);
 
       // ---- SIGHT SLIDE + WHISPER PARALLAX ----
-      // The sight (world image + etch LOCKED together) travels as one inside
-      // the ocular as the weapon rotates under the eye — the whole picture
-      // slides and clips into the tunnel instead of swimming internally.
-      // True parallax (reticle vs world) is a ~6% whisper on top of that.
-      // uParallaxSens fine-tunes the whisper only (1.06 default).
-      vec2 rawSight = -uEyeOffset * 2.0;
+      // The world image is now ROTATED WITH THE GUN (the render camera is on
+      // the barrel), so the internal lateral slide is only the *parallax*
+      // whisper — a real eye off-axis shifts the etched reticle against the
+      // distant world by a hair, not half a lens. Kept small on purpose: the
+      // "sway" the player should feel is the WHOLE gun rotating, expressed as
+      // tunnel tilt + edge blackout below, not the picture swimming.
+      vec2 rawSight = -uEyeOffset * 0.6;
       float maxSight = uVignetteSize * 0.8;
       vec2 sightC = length(rawSight) > maxSight ? normalize(rawSight) * maxSight : rawSight;
       vec2 imageShift = -sightC;
       vec2 imageCenter = sightC;
       vec2 reticleCenter = sightC * uParallaxSens;
-      vec2 tubeCenter = -uEyeOffset * 0.55;
+      vec2 tubeCenter = -uEyeOffset * 0.3;
 
       // ---- 3D FORESHORTENING: tilted tube projects as an ellipse ----
       // viewAngle = combined eye-offset + bore/eye angular mismatch (radians).
@@ -907,18 +913,30 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 tiltDir = tiltMag > 1e-4 ? uViewAngle / tiltMag : vec2(1.0, 0.0);
       float tiltCos = cos(min(tiltMag, 0.65));
 
-      // ---- EYE-RELIEF APERTURE (computed early: reticle + dirt need it) ----
-      // relief 1.0 = optimal. Too far shrinks the picture (scope shadow closing
-      // in); too close blows it out past the ocular. Off-relief edges harden.
+      // ---- EYE-RELIEF APERTURE (physical exit pupil) ----
+      // relief 1.0 = eye seated at the exit pupil. Too far shrinks the picture
+      // (the exit-pupil disc falls inside the eye pupil → narrower FOV, the
+      // classic "scope shadow closing in"); too close blows it out past the
+      // ocular field stop. uZoomK = exit-pupil magnification penalty: the exit
+      // pupil diameter = objective / magnification, so cranked zoom makes the
+      // SAME error cost dramatically more — harder eye relief you can *feel*.
       // Shouldering progression is deliberately back-loaded: hip is a tiny dim
       // peephole, mid-travel is still mostly black tunnel with a sweeping
       // crescent, and the full picture only lands at the end of ADS — like
       // finding the eye box on a real optic. Do NOT linearize this.
       float eyeBox = smoothstep(0.0, 0.9, uAdsWeight);
-      float reliefShrink = clamp(pow(max(uEyeRelief, 0.35), -1.1), 0.22, 1.05);
-      float tooClose = smoothstep(0.35, 0.75, uEyeRelief);
+      // exit-pupil FOV penalty grows with relief error AND magnification:
+      // reliefShrink handles "too far", tooClose handles "inside the pupil".
+      float reliefErr = abs(uEyeRelief - 1.0);
+      float reliefShrink = clamp(pow(max(uEyeRelief, 0.35), -1.15), 0.18, 1.05);
+      float tooClose = smoothstep(0.35, 0.78, uEyeRelief);
+      // NOTE: no base-aperture zoom penalty. A perfectly seated eye sees the
+      // FULL field through the ocular at any magnification — the picture must
+      // stay full-size and full-bright when you're still. The zoom penalty
+      // lives in the *error response* (uEyeOffset/uEyeRelief are amplified by
+      // zoomTighten in JS), so it only bites when you sway, never when centered.
       float currentAperture = uVignetteSize * reliefShrink * tooClose * mix(0.35, 1.0, eyeBox);
-      float shadowK = uShadowHardness * mix(1.6, 0.8, tooClose * clamp(2.0 - uEyeRelief, 0.0, 1.0));
+      float shadowK = uShadowHardness * mix(1.7, 0.75, tooClose * clamp(2.0 - uEyeRelief, 0.0, 1.0));
       // zoomed glass punishes harder: edge hardens with magnification
       shadowK *= 1.0 + (uZoomK - 1.0) * 0.25;
       // edge stays hard while shouldering, relaxes once seated in the eye box
@@ -927,16 +945,28 @@ const lensMat = new THREE.ShaderMaterial({
       // reticle fades in LAST — off-axis eyes see no etch, only tunnel
       float etchVis = smoothstep(0.45, 0.9, uAdsWeight);
       // off-axis transmission collapse: hip peephole runs dark, not full-bright.
-      // Zoomed glass goes dark faster off-axis: same sway costs more picture.
+      // (uEyeOffset/uEyeRelief are ALREADY zoom-amplified in JS, so no uZoomK
+      // here — the "same sway = blacker at high zoom" comes free from that.)
       float reliefDim = mix(0.25, 1.0, smoothstep(0.15, 0.95, uAdsWeight));
-      reliefDim /= 1.0 + swayDist * (uZoomK - 1.0) * 1.2;
+      reliefDim /= 1.0 + swayDist * 1.2 + reliefErr * 0.8;
 
-      // Subtle lateral CA: zero in center, gentle rim-only split (~2px at the
-      // rim at 1024). No sway blowup — sway already moves the whole image via
-      // parallax, multiplying the fringe on top looked cheap and shimmery.
-      float caMask = smoothstep(0.12, 0.45, distFromCenter);
-      caMask *= caMask;
-      float dynamicAberration = uAberration * (0.7 + swayDist * 0.6) * caMask;
+      // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
+      // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
+      // just darkness). 5-tap cross, radius tracks total eye error. Computed
+      // before the CA/distortion block so the axial color can ride on it.
+      // (inputs already zoom-amplified in JS — no uZoomK re-multiply here.)
+      float blurMix = clamp(abs(uEyeRelief - 1.0) * 0.9 + swayDist * 0.6, 0.0, 1.0);
+
+      // Physical lateral CA: zero at center, grows linearly to the rim. A real
+      // ocular's transverse color makes a visible magenta/green fringe at the
+      // edge of the sight picture; keep it honest (~2-3px at 768) rather than
+      // a fisheye rainbow. Sway modulates it slightly (the eye sits off the
+      // optical axis, which bends color more).
+      float caMask = smoothstep(0.10, 0.46, distFromCenter);
+      float dynamicAberration = uAberration * (0.75 + swayDist * 0.5) * caMask;
+      // Longitudinal color rides on defocus: out-of-focus edges split blue/red
+      // around the green focal plane (axial CA). Grows with relief error + zoom.
+      float axialAberration = uAberration * (0.35 + blurMix * 1.6) * caMask;
 
       // Rim-weighted barrel distortion: zero in the center, tiny bulge at the
       // outer circle only (~3px at the rim at ADS). Real ocular glass bends
@@ -946,21 +976,18 @@ const lensMat = new THREE.ShaderMaterial({
       // flip the objective's inverted image before the ocular, so the eye
       // always gets an upright picture.
       vec2 imgUv = uv + imageShift;
-      float rimT = smoothstep(0.15, 0.5, length(imgUv));
-      float barrelK = mix(0.012, 0.008, uAdsWeight);
+      float imgR = length(imgUv);
+      float rimT = smoothstep(0.15, 0.5, imgR);
+      float barrelK = mix(0.016, 0.010, uAdsWeight);
       vec2 baseUv = imgUv * (1.0 - barrelK * rimT * rimT);
-      float br2 = dot(baseUv, baseUv);
+      float br = length(baseUv);
 
-      // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
-      // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
-      // just darkness). 5-tap cross, radius tracks total eye error.
-      float blurMix = clamp(abs(uEyeRelief - 1.0) * 0.9 + swayDist * (uZoomK - 1.0) * 0.6, 0.0, 1.0);
       float blurR = blurMix * 0.006;
-      vec3 sharpC = sampleSight(baseUv, br2, dynamicAberration);
-      vec3 bx = (sampleSight(baseUv + vec2(blurR, 0.0), br2, dynamicAberration)
-        + sampleSight(baseUv - vec2(blurR, 0.0), br2, dynamicAberration)) * 0.5;
-      vec3 by = (sampleSight(baseUv + vec2(0.0, blurR), br2, dynamicAberration)
-        + sampleSight(baseUv - vec2(0.0, blurR), br2, dynamicAberration)) * 0.5;
+      vec3 sharpC = sampleSight(baseUv, br, dynamicAberration, axialAberration);
+      vec3 bx = (sampleSight(baseUv + vec2(blurR, 0.0), br, dynamicAberration, axialAberration)
+        + sampleSight(baseUv - vec2(blurR, 0.0), br, dynamicAberration, axialAberration)) * 0.5;
+      vec3 by = (sampleSight(baseUv + vec2(0.0, blurR), br, dynamicAberration, axialAberration)
+        + sampleSight(baseUv - vec2(0.0, blurR), br, dynamicAberration, axialAberration)) * 0.5;
       vec3 sceneColor = mix(sharpC, (bx + by) * 0.5, blurMix);
       // Coated-glass transmission loss + off-axis dimming: ADS center runs
       // ~78% of naked-eye brightness, hip peephole collapses toward 30%.
@@ -1181,6 +1208,38 @@ const lensMat = new THREE.ShaderMaterial({
       // depth falloff: the far end of the tunnel falls darker (tube length read)
       tubeWall *= mix(1.0, 0.55, smoothstep(currentAperture, 0.5, distTube));
       tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * objectiveMask * transitBoost;
+
+      // ---- INNER OBJECTIVE RING (second glass layer, depth parallax) ----
+      // A real scope is a stack of elements, not one flat screen: the objective
+      // lens sits deep in the bell behind the field stop. Drawing it as a ring
+      // that shifts at a *different* parallax rate than the ocular rim and the
+      // image gives three planes sliding against each other — that relative
+      // motion is what reads as a hollow 3D tube instead of a painted washer.
+      {
+        vec2 innerC = -uEyeOffset * 0.55;
+        float innerR = currentAperture * 1.05 + outerSoft * 0.01;
+        float ir = ellR(uv, innerC, tiltDir, tiltCos);
+        float innerRing = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.012, abs(ir - innerR));
+        vec2 innerN = normalize(uv - innerC + vec2(1e-4));
+        float innerSun = pow(max(dot(innerN, sunN) * 0.5 + 0.5, 0.0), 4.0);
+        tubeWall += vec3(0.20, 0.19, 0.185) * innerRing
+          * (0.20 + 0.55 * innerSun * uSunFacing) * (1.0 - objectiveMask) * (0.4 + 0.6 * etchVis);
+        // objective glass catches a faint blue sky kiss, like coated glass
+        tubeWall += vec3(0.12, 0.16, 0.20) * innerRing * (1.0 - objectiveMask)
+          * (0.08 + 0.25 * uSunIntensity);
+      }
+
+      // Tube inner-surface fresnel: the wall is glass, so it reflects a whisper
+      // of the world at grazing angles near the ocular — bright rim, black
+      // center. This is the "looking down a glass tube" sheen, distinct from
+      // the matte baffles; it rolls with the sun and the eye.
+      {
+        float grazing = pow(1.0 - clamp(distTube / 0.5, 0.0, 1.0), 1.6);
+        float wallFres = grazing * (0.05 + 0.35 * uSunIntensity);
+        vec2 frN = normalize(uv - tubeCenter + vec2(1e-4));
+        float frSun = pow(max(dot(frN, sunN) * 0.5 + 0.5, 0.0), 6.0);
+        tubeWall += vec3(0.35, 0.42, 0.48) * wallFres * (0.3 + 0.7 * frSun) * (1.0 - objectiveMask);
+      }
 
       // Lens-coating sheen (MgF2-style): magenta/green shift that lives near
       // the rim and swings hue with the sun side. Plus a sky-colored fresnel
@@ -1699,15 +1758,36 @@ function animate(): void {
       (Math.sin(walkPh * 2.0) * 0.0025 * moveBlend + Math.sin(time * 2.3) * 0.0012) * bobScale;
     const bobZ =
       (Math.sin(time * 1.1) * 0.003 + Math.sin(walkPh) * 0.002 * moveBlend) * bobScale;
+    // Shoulder travel: each stride pushes the rifle into/away from the cheek
+    // weld, modulating EYE RELIEF directly while moving — even at full ADS the
+    // scope breathes in and out against your eye. Kept partly active at ADS
+    // (unlike bob, which collapses to 25%) so the exit-pupil aperture visibly
+    // swells and pinches with every footfall at high magnification.
+    const shoulderZ =
+      Math.sin(walkPh * 2.0 + 0.5) * 0.011 * moveBlend *
+      THREE.MathUtils.lerp(1.0, 0.55, currentAdsWeight);
     // slow positional drift: gun wanders under the eye (more at hip)
     const driftScale =
       THREE.MathUtils.lerp(1.0, 0.3, currentAdsWeight) * breathFactor;
     const driftX = Math.sin(time * 0.9 + 1.3) * 0.006 * driftScale;
     const driftY = Math.sin(time * 1.2 + 0.4) * 0.004 * driftScale;
 
-    const swayMul = (isAiming ? 0.005 : 0.015) * breathFactor;
-    const breathRX = Math.sin(time * 2.0) * swayMul;
-    const breathRY = Math.cos(time * 1.0) * (swayMul * 0.5);
+    // ---- PHYSICAL SWAY: the WHOLE gun swings as a body, not the image ----
+    // Breathing is a slow chest rise/fall; walking swings the rifle like a
+    // pendulum with each stride. Both feed the spring-damper BELOW as
+    // rotational targets, so the gun answers with mass and the scope + world
+    // + reticle all rotate together. Deliberately bigger than the old
+    // hand-tuned wobble — a real rifle at the shoulder never sits still.
+    const breathAmp = (isAiming ? 0.009 : 0.02) * breathFactor;
+    const breathRX = Math.sin(time * 2.1 + 0.4) * breathAmp;
+    const breathRY = Math.cos(time * 1.05 + 0.9) * (breathAmp * 0.55);
+    const breathRR = Math.sin(time * 1.3 + 2.0) * (breathAmp * 0.4);
+    // stride pendulum: roll + yaw lag with each footfall, strongest at hip,
+    // still present (shoulder carries momentum) while ADS.
+    const strideAmp = (isAiming ? 0.008 : 0.03) * moveBlend;
+    const stepRX = Math.sin(walkPh) * strideAmp;
+    const stepRY = Math.cos(walkPh * 0.5) * (strideAmp * 0.6);
+    const stepRR = Math.sin(walkPh * 1.3) * (strideAmp * 0.45);
 
     // CHEEK WELD: the eye rides the gun. Tracking a turn shouldered keeps
     // alignment — error is a brief transient on jerks, never a standing
@@ -1759,9 +1839,12 @@ function animate(): void {
     const baseRotY = THREE.MathUtils.lerp(0.15, 0.0, targetWeight);
     const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
     {
-      const tRX = -mouseVelocityY + breathRY + kickPitch;
-      const tRY = baseRotY - mouseVelocityX + breathRX;
-      const tRZ = baseRotZ - mouseVelocityX * 0.75 + kickRoll;
+      // Mouse lag is halved here: the cheek weld tracks the head tighter so a
+      // tracking turn doesn't swim the sight picture, while breathing + stride
+      // swing keep the physical "gun has mass" sway. Recoil still punches in.
+      const tRX = -mouseVelocityY * 0.5 + breathRY + stepRX + kickPitch;
+      const tRY = baseRotY - mouseVelocityX * 0.5 + breathRX + stepRY;
+      const tRZ = baseRotZ - mouseVelocityX * 0.4 + breathRR + stepRR + kickRoll;
       const KR = 160;
       const CR = 20.0;
       const KP = 110;
@@ -1775,7 +1858,7 @@ function animate(): void {
       weaponGroup.rotation.set(wRot.x, wRot.y, wRot.z);
       wVel.x += ((_anchor.x + bobX + driftX - wPos.x) * KP - wVel.x * CP) * delta;
       wVel.y += ((_anchor.y + bobY + driftY - wPos.y) * KP - wVel.y * CP) * delta;
-      wVel.z += ((_anchor.z + bobZ - wPos.z) * KP - wVel.z * CP) * delta;
+      wVel.z += ((_anchor.z + bobZ + shoulderZ - wPos.z) * KP - wVel.z * CP) * delta;
       wPos.x += wVel.x * delta;
       wPos.y += wVel.y * delta;
       wPos.z += wVel.z * delta;
@@ -1813,15 +1896,17 @@ function animate(): void {
       const optRelief = isAcog ? 0.24 : 0.145; // ADS eye-to-ocular distance
       const reliefDist = Math.max(_eyeLocal.z - ocularZ, 0.02);
       // ZOOM TIGHTENS THE EYE BOX — prominently: higher magnification = much
-      // more critical eye position AND relief (true on real optics). Base mag
-      // reads 1.0; fully zoomed runs ~4x gain, zoomed out ~0.25x — down there
-      // it's just glass, barely an eye-relief problem. Quadratic falloff so
-      // the forgiving end drops off fast while the top end bites hard.
+      // more critical eye position AND relief (true on real optics). The exit
+      // pupil diameter = objective / magnification, so the eye box and the
+      // usable eye relief both collapse as you crank magnification: base mag
+      // reads ~1x gain, fully zoomed runs ~6x. Quadratic falloff so the
+      // forgiving end drops off fast while the top end bites hard — this is
+      // the "harder eye relief when zoomed" feel the shader eats up.
       const baseFov = isAcog ? ACOG_FOV : SNIPER_FOV;
       const zoomTighten = THREE.MathUtils.clamp(
         Math.pow(baseFov / config.fov, 2.0),
         0.25,
-        4.0,
+        6.0,
       );
       const relief = THREE.MathUtils.clamp(
         1 + (reliefDist / optRelief - 1) * zoomTighten,
