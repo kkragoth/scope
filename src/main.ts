@@ -798,7 +798,6 @@ const lensMat = new THREE.ShaderMaterial({
     uEyeRelief: { value: 1.0 },
     uZoomK: { value: 1.0 },
     uSwaySpeed: { value: 0.0 },
-    uReticleRoll: { value: 0.0 },
     uAdsWeight: { value: 0.0 },
     uTime: { value: 0.0 },
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
@@ -832,7 +831,6 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uEyeRelief;
     uniform float uZoomK;
     uniform float uSwaySpeed;
-    uniform float uReticleRoll;
     uniform float uAdsWeight;
     uniform float uTime;
     uniform vec2 uSunSide;
@@ -974,10 +972,12 @@ const lensMat = new THREE.ShaderMaterial({
       // limiting stop (full aperture, but defocus — below — takes over). No
       // more symmetric bell fudge: one physical min() of two discs.
       float reliefErr = abs(uEyeRelief - 1.0);
-      // Exit-pupil disc radius: shrinks ~1/relief as the eye backs off, so it
-      // falls inside the fixed eye pupil (seated size = uVignetteSize) — the
-      // real limiting stop when seated or closer. min() of the two discs.
-      float exitR = uVignetteSize / max(uEyeRelief, 0.5);
+      // Exit-pupil disc radius. The physical 1/relief collapse is real but it
+      // read as "tunnel vision" once zoom amplified the relief error — so the
+      // shrink is kept gentle: seated-or-closer stays full, and even at the far
+      // end (relief 3) the picture only pinches to ~62%, never a third. The
+      // crescent carries the eye-relief cue; this is just a subtle squeeze.
+      float exitR = uVignetteSize * mix(1.0, 0.62, smoothstep(1.0, 3.0, uEyeRelief));
       // NOTE: no base-aperture zoom penalty. A perfectly seated eye sees the
       // FULL field through the ocular at any magnification — the picture must
       // stay full-size and full-bright when you're still. The zoom penalty
@@ -1001,7 +1001,7 @@ const lensMat = new THREE.ShaderMaterial({
       // is tied to RELIEF DISTANCE (reliefErr) only — a lateral sway must NOT
       // darken the whole picture (that was the "vignette on pan" read as wrong).
       float reliefDim = mix(0.25, 1.0, smoothstep(0.15, 0.95, uAdsWeight));
-      reliefDim /= 1.0 + reliefErr * 0.8;
+      reliefDim /= 1.0 + reliefErr * 0.25;
 
       // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
       // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
@@ -1011,7 +1011,7 @@ const lensMat = new THREE.ShaderMaterial({
       // (inputs already zoom-amplified in JS — no uZoomK re-multiply here.)
       // Lateral sway keeps only a whisper of symmetric defocus; the crescent is
       // the loud cue, not a full-frame blur.
-      float blurMix = clamp(abs(uEyeRelief - 1.0) * 1.6 + swayDist * 0.35, 0.0, 1.0);
+      float blurMix = clamp(abs(uEyeRelief - 1.0) * 1.0 + swayDist * 0.35, 0.0, 1.0);
 
       // Physical lateral CA: zero at center, grows to the rim. A real ocular's
       // transverse color makes a visible magenta/green fringe at the edge of
@@ -1030,7 +1030,11 @@ const lensMat = new THREE.ShaderMaterial({
       // grows with eye relief (sway) and hard zoom, so the distortion lives at
       // the screen edge exactly where eye relief and magnification bite.
       // Distorted around the shifted image plane so glass feels volumetric.
-      float imageScale = uEyeRelief;              // 1 seated; >1 far (image shrinks); <1 close (grows)
+      // Relief-driven image scale is damped: a full 1:1 follow of uEyeRelief
+      // magnified/shrunk the image alongside the aperture shrink, compounding
+      // the "tunnel vision" at high zoom. Keep only 40% of the deviation so
+      // the picture stays close to 1:1 while the crescent does the talking.
+      float imageScale = mix(1.0, uEyeRelief, 0.4);
       vec2 imgUv = (uv + imageShift) * imageScale;
       float swayBoost = min(swayDist * 2.0, 1.0);
       float zoomBoost = clamp((uZoomK - 1.0) * 0.45, 0.0, 1.0);
@@ -1092,10 +1096,10 @@ const lensMat = new THREE.ShaderMaterial({
       // FFP vs SFP: sniper reticle scales with magnification (first focal
       // plane — subtensions stay true at any zoom), ACOG stays fixed size
       // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
-      // RETICLE ROLL: the etch is fixed to the gun, the eye is fixed to the
-      // head. When the tube rolls relative to the eye the cross tilts "/" vs
-      // "\" while the rotationally-symmetric lens image stays level. Rotate
-      // eye-space coords back into gun-space by -roll to draw that.
+      // NO RETICLE ROLL: the picture is counter-rolled (JS keeps the render
+      // camera level) and the etch is drawn straight in its space, so the
+      // crosshair is glued level to the image. Panning or rolling the gun
+      // never tilts the cross — it always stays plumb with the world.
       vec2 rc = uv - reticleCenter;
       // Seat the etch IN the glass: bend it with the same ocular curvature as
       // the image (barrelWarp + barrelK), but a touch MORE so the etch reads
@@ -1103,12 +1107,9 @@ const lensMat = new THREE.ShaderMaterial({
       // second "layer" of the double-barrel. A flat overlay is what read as
       // "plastered".
       vec2 rcBent = barrelWarp(rc, barrelK * 1.12);
-      float cR = cos(uReticleRoll);
-      float sR = sin(uReticleRoll);
-      vec2 rcGun = vec2(cR * rcBent.x + sR * rcBent.y, -sR * rcBent.x + cR * rcBent.y);
       // Eye-distance size cue: closer eye reads the etch slightly larger.
-      vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
-      vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
+      vec2 p  = rcBent / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
+      vec2 pi = rcBent / imageScale;                    // illuminated reticle (fixed focal plane)
       bool isAcog = uOpticMode > 0.5;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
@@ -1359,13 +1360,14 @@ const lensMat = new THREE.ShaderMaterial({
         // centred disc — uSwaySpeed now feeds the crescent's bite, replacing the
         // old symmetric aperture collapse that read as tunnel vision.
         // uCrescentPower (0..1) maps LOW/MEDIUM/HIGH/EXTREME onto the bite
-        // gain with a squared ramp so the top end dominates: LOW ≈ 1.7x, MEDIUM
-        // ≈ 3.2x, HIGH ≈ 5.6x, EXTREME ≈ 9x. EXTREME drives slide toward ~1.0,
-        // where the pupil has slid almost past the field stop and only a hair
-        // of sight picture survives — "almost impossible to see".
+        // gain with a squared ramp so the top end dominates: LOW ≈ 2.2x, MEDIUM
+        // ≈ 4.4x, HIGH ≈ 8x, EXTREME ≈ 13x. The slide is the pupil-center
+        // offset as a FRACTION of the field-stop radius; slide ≈ 1.7 leaves the
+        // two circles nearly tangent so ~90% of the sight picture is blacked
+        // out — a big crescent, not a thin rim.
         float swingBoost = 1.0 + uSwaySpeed * 1.2;
-        float crescentGain = mix(1.2, 9.0, uCrescentPower * uCrescentPower);
-        float slide = min(eyeMag * crescentGain * swingBoost, 0.98);
+        float crescentGain = mix(1.5, 13.0, uCrescentPower * uCrescentPower);
+        float slide = min(eyeMag * crescentGain * swingBoost, 1.7);
         vec2 pupilC = nearC + eyeDir * nearR * slide * uCrescentSide;
         float bite = length(uv - pupilC) - nearR;
         // Edge-attached gradient: darkest where the bite is deepest (at the
@@ -2158,8 +2160,10 @@ function animate(): void {
     // HEAD LEAN: auto (strafe + lateral flick) + manual Q/E. Applied to
     // pitchObject so head AND gun move together — the world (inside and
     // outside the scope) tilts and shifts for corner-peeking while the optic
-    // stays usable. The weapon adds its own EXTRA roll on top (below) — the
-    // difference between the two is what tilts the reticle against the image.
+    // stays usable. The weapon adds its own EXTRA roll on top (below); both
+    // the scope image and the crosshair are roll-cancelled in the optic, so
+    // that extra roll only reads as gun model motion, never as a tilt of the
+    // sight picture.
     {
       const strafe = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
       const leanTarget = THREE.MathUtils.clamp(
@@ -2223,14 +2227,14 @@ function animate(): void {
     }
     lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
 
-    // SCOPE IMAGE STAYS LEVEL WHILE THE RETICLE ROLLS: the objective lenses
-    // are rotationally symmetric, so rolling the tube around its own optical
-    // axis must NOT rotate the world image — only the etched reticle (drawn
-    // in the shader, rotated by uReticleRoll) tilts with the gun. Counter-
-    // rolling the render camera here cancels the weapon-relative roll while
-    // preserving head lean from pitchObject, so horizon "/" vs "\" comes
-    // from the head and the cross "/" vs "\" comes from the gun. Correct on
-    // all 3 planes: pitch/yaw flow through from the barrel, roll does not.
+    // SCOPE IMAGE AND CROSSHAIR STAY LEVEL: the objective lenses are
+    // rotationally symmetric, so rolling the tube around its own optical
+    // axis must NOT rotate the world image. Counter-rolling the render
+    // camera here cancels the weapon-relative roll while preserving head
+    // lean from pitchObject. The etched reticle is drawn straight in the
+    // picture space, so the crosshair stays glued level too — it never
+    // rotates when you pan or roll the gun. Pitch/yaw flow through from the
+    // barrel; only roll is cancelled.
     scopeCamera.rotation.z = -weaponGroup.rotation.z;
 
     // ---- TRUE 3D EYE VECTOR: where is the eye in tube space? ----
@@ -2341,9 +2345,6 @@ function animate(): void {
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
-
-      // Reticle roll = weapon-relative roll (gun fixed etch vs head fixed eye)
-      lensMat.uniforms.uReticleRoll.value = weaponGroup.rotation.z;
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
