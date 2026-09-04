@@ -1716,6 +1716,15 @@ function setOpticMode(acog: boolean): void {
   // Objective station differs per housing (sniper bell vs ACOG cup)
   scopeCamera.position.z = acog ? -0.14 : -(tubeLength / 2);
   scopeCamera.updateProjectionMatrix();
+  // Fresh shoulder weld for the swapped optic: the eye geometry of the two
+  // rifles differs, so a leftover eye-box crescent / swing-speed state from
+  // the old optic must not ride along into the new sight picture.
+  _eyeSm.set(0, 0);
+  _reliefSm = 1.0;
+  _swaySpeed = 0.0;
+  lensMat.uniforms.uEyeOffset.value.set(0, 0);
+  lensMat.uniforms.uEyeRelief.value = 1.0;
+  lensMat.uniforms.uSwaySpeed.value = 0.0;
   updateAmmoUI();
 }
 
@@ -2017,6 +2026,17 @@ function animate(): void {
     // gated off once shouldered. Organic breath/stride roll, real Q/E lean and
     // the yaw/pitch weapon lag (eye-box) are untouched.
     const panRoll = isAiming ? 0.0 : 1.0;
+    // TWO SEPARATE SYSTEMS at the shoulder: WHERE YOU LOOK (the tube aim + its
+    // picture) is driven by the mouse, and sway must NOT detach it. The old
+    // mouse-lag rotation — the rifle trailing a pan like it carries inertia —
+    // is a hip-language cue; at ADS magnification that lag (up to ~0.08 rad,
+    // wider than the whole scope field once zoomed) swung the picture off the
+    // aim line and "snapped back" when the pan ended. It eases out as the
+    // cheek weld seats so the shoulder transition never pops. The scope keeps
+    // its eye-relief life not by rotating the tube but via a synthetic
+    // cheek-weld error (see the eye-vector block) — the crescent reacts to
+    // weapon motion while the picture stays rigidly on the aim line.
+    const aimLagK = THREE.MathUtils.lerp(1.0, 0.0, currentAdsWeight);
 
     const holdRate = breathHeld ? 5.0 : 3.0;
     holdBlend += ((breathHeld ? 1 : 0) - holdBlend) * Math.min(1, holdRate * delta);
@@ -2056,13 +2076,16 @@ function animate(): void {
     // rotational targets, so the gun answers with mass and the scope + world
     // + reticle all rotate together. Deliberately bigger than the old
     // hand-tuned wobble — a real rifle at the shoulder never sits still.
-    const breathAmp = (isAiming ? 0.009 : 0.02) * breathFactor;
+    // Shouldered amplitudes are now heavily tamed: just enough slow motion to
+    // read "alive" through the glass without the reticle wandering off target.
+    // Hip keeps the old body-language values.
+    const breathAmp = (isAiming ? 0.0022 : 0.02) * breathFactor;
     const breathRX = Math.sin(time * 2.1 + 0.4) * breathAmp;
     const breathRY = Math.cos(time * 1.05 + 0.9) * (breathAmp * 0.55);
     const breathRR = Math.sin(time * 1.3 + 2.0) * (breathAmp * 0.4);
     // stride pendulum: roll + yaw lag with each footfall, strongest at hip,
     // still present (shoulder carries momentum) while ADS.
-    const strideAmp = (isAiming ? 0.008 : 0.03) * moveBlend;
+    const strideAmp = (isAiming ? 0.0018 : 0.03) * moveBlend;
     const stepRX = Math.sin(walkPh) * strideAmp;
     const stepRY = Math.cos(walkPh * 0.5) * (strideAmp * 0.6);
     const stepRR = Math.sin(walkPh * 1.3) * (strideAmp * 0.45);
@@ -2102,17 +2125,25 @@ function animate(): void {
     const stillZoom = THREE.MathUtils.smoothstep(zoomTw, 1.6, 5.0);
     // Zoomed aim wobble is DAMPED, not amplified: the magnified view already
     // enlarges any angular sway, so pushing it up makes the whole screen shake
-    // apart. Cut it roughly in half once you're well zoomed and shouldered.
+    // apart. Damp hard once you're well zoomed and shouldered.
     const zoomSwayDamp = THREE.MathUtils.lerp(
       1.0,
-      0.5,
+      0.15,
       currentAdsWeight * stillZoom,
     );
     // Heavy sniper breathes slow and deep; the light carbine is snappier but
     // trembles more.
     const lowK = acogActive ? 0.8 : 1.15;
     const tremorK = acogActive ? 1.25 : 0.7;
-    const swayAmp = (isAiming ? 1.0 : 2.0) * (1.0 + exertion * 0.7);
+    // Exertion (mouse flicks / running) is a HIP sway driver — while aiming it
+    // would make every small correction pump the wobble up for seconds, so its
+    // contribution is damped to ~30% at the shoulder.
+    const swayAmp =
+      (isAiming ? 0.2 : 2.0) * (1.0 + exertion * 0.7 * (isAiming ? 0.3 : 1.0));
+    // Tremor (8–13 Hz) and the heartbeat pulse are the "shake band": through a
+    // magnified sight they read as jitter, not drift, so they are all but
+    // switched off at the shoulder. Slow breath + wander carry the idle life.
+    const hfK = isAiming ? 0.08 : 1.0;
     // Shift gates nearly everything: a real hold leaves ~15% residual and a
     // slowed, faded pulse — the sight picture goes still.
     const steadyK = 1.0 - holdBlend * 0.85;
@@ -2140,15 +2171,17 @@ function animate(): void {
     // down and fades it — the hold goes quiet instead of pounding.
     heartPh += delta * (1.1 + exertion * 0.5) * (1.0 - holdBlend * 0.35);
     const hbThump = Math.pow(Math.max(Math.sin(heartPh * TAU), 0), 8);
-    const hbAmp = 0.0012 * (0.4 + exertion * 1.2) * (1.0 - holdBlend * 0.6);
+    const hbAmp = 0.0012 * (0.4 + exertion * 1.2) * (1.0 - holdBlend * 0.6) * hfK;
     // Physiological tremor, 8–13 Hz — sub-pixel at rest, grows with exertion.
+    // Squashed at the shoulder (hfK): through magnification it reads as a
+    // 10 Hz jitter on the reticle, which is exactly the "jerky" look.
     const tremorA = (0.25 + exertion) * tremorK * (0.2 + 0.8 * steadyK);
     const trX =
       (Math.sin(time * TAU * 9.3 + seedB) * 0.0006 +
-        Math.sin(time * TAU * 12.7 + seedD) * 0.0004) * tremorA;
+        Math.sin(time * TAU * 12.7 + seedD) * 0.0004) * tremorA * hfK;
     const trY =
       (Math.sin(time * TAU * 8.1 + seedC) * 0.0006 +
-        Math.sin(time * TAU * 11.3 + seedA) * 0.0004) * tremorA;
+        Math.sin(time * TAU * 11.3 + seedA) * 0.0004) * tremorA * hfK;
     // Gasp shudder after releasing Shift.
     const gaspW = Math.sin(time * 57.0) * ((gaspT / 0.6) * 0.004);
     // COMMON-MODE (head + gun together): aim wanders over the world, the eye
@@ -2239,16 +2272,16 @@ function animate(): void {
     const baseRotY = THREE.MathUtils.lerp(0.15, yawAds, targetWeight);
     const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
     {
-      // Mouse lag is the eye-relief driver: the cheek weld tracks the head
-      // tightly, but a rifle still carries inertia, so the gun lags the head
-      // on quick movements — that relative rotation is what pushes the eye off
-      // axis and opens the eye-box crescent. Breathing + stride keep the slow
-      // physical sway; recoil still punches in.
-      const tRX = swayOn * (-mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch + diffPitch);
-      const tRY = baseRotY + swayOn * (-mouseVelocityX * 0.9 + breathRX + stepRY + diffYaw);
+      // Mouse lag drives the eye-box at the HIP, where the gun trailing the
+      // pan reads as inertia. Once shouldered the aim line is rigid to the
+      // look direction (aimLagK → 0), so mouse-derived lag can never detach
+      // the scope picture from where you are pointing. Breathing + stride
+      // still move the tube a little at the shoulder, and recoil punches in.
+      const tRX = swayOn * (-mouseVelocityY * 0.9 * aimLagK + breathRY + stepRX + kickPitch + diffPitch);
+      const tRY = baseRotY + swayOn * (-mouseVelocityX * 0.9 * aimLagK + breathRX + stepRY + diffYaw);
       // panRoll: cursor L/R panning never rolls the tube (bottom line of the
       // reticle stays plumb); only organic roll sources and firing kick remain.
-      const tRZ = baseRotZ + swayOn * (-mouseVelocityX * 0.6 * panRoll + breathRR + stepRR + kickRoll * panRoll + diffRoll);
+      const tRZ = baseRotZ + swayOn * (-mouseVelocityX * 0.6 * panRoll * aimLagK + breathRR + stepRR + kickRoll * panRoll + diffRoll);
       const KR = 128;
       const CR = 17.0;
       const KP = 88;
@@ -2326,24 +2359,33 @@ function animate(): void {
       const rawMag = Math.hypot(rawX, rawY);
       const distGain =
         0.55 + 0.45 * THREE.MathUtils.smoothstep(rawMag, 0.3, 1.5);
-      // PHANTOM EYE-BOX DRIFT (swayMode 2): the geometry is locked rigid so
-      // the real eye vector sits dead-centre and no crescent would ever show.
-      // Synthesize the cheek-weld error the sway would have produced from the
-      // same motion signals that feed the real one — mouse velocity (weapon
-      // lag), slow breathing and stride. Ramps in with currentAdsWeight so
-      // it only acts once you're shouldered, then rides the normal
-      // zoom-gain / operator-reseat pipeline below exactly like real sway.
-      const phK = swayMode === 2 ? currentAdsWeight : 0;
+      // PHANTOM EYE-BOX (every sway mode once shouldered): the tube aim is
+      // rigid to the look direction (aimLagK above), so the real eye vector
+      // stays dead-centre and no crescent would ever show. A synthetic
+      // cheek-weld error — fed by the same motion signals the old weapon lag
+      // used (mouse velocity, slow breathing, stride) — drives the exit-pupil
+      // shadow instead. This is the "where I look" vs "sway" split: the
+      // picture NEVER moves with mouse sway — only the shadow bites — so
+      // panning to re-aim stays 1:1 at any zoom while the optic still reads as
+      // an imperfect cheek weld. Ramps in with currentAdsWeight, then rides
+      // the zoom-gain / operator-reseat pipeline below exactly like real sway.
+      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2) runs full
+      // strength; FREE (mode 0) runs a gentler copy.
+      const phK =
+        currentAdsWeight *
+        (swayMode === 1 ? 0.0 : swayMode === 2 ? 1.0 : 0.6);
       const phX =
-        (-mouseVelocityX * 2.0 +
+        (mouseVelocityX * 2.0 +
           Math.sin(time * 0.9 + seedC) * 0.02 +
           Math.sin(walkPh) * 0.035 * moveBlend) * phK;
       const phY =
         (-mouseVelocityY * 1.4 +
           Math.sin(time * 1.2 + seedA) * 0.02 +
           Math.cos(walkPh * 2.0) * 0.03 * moveBlend) * phK;
-      const softX = (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
-      const softY = (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
+      const softX =
+        (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
+      const softY =
+        (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
       const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
       const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
       // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
