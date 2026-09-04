@@ -2009,6 +2009,14 @@ function animate(): void {
     // Only base rotations (hip→ADS easing), recoil impulses and manual Q/E
     // lean survive.
     const swayOn = swayMode === 0 ? 1.0 : 0.0;
+    // Plumb reticle while ADSing: panning the cursor is a YAW, and a yaw must
+    // never roll the rifle — rolling the tube on a lateral sweep is what tips
+    // the crosshair's bottom line away from straight-down. The little mouse-
+    // derived ROLL (and mouse-driven head lean) that sells "gun carries into a
+    // turn" at the hip reads as a broken scope through the glass, so both are
+    // gated off once shouldered. Organic breath/stride roll, real Q/E lean and
+    // the yaw/pitch weapon lag (eye-box) are untouched.
+    const panRoll = isAiming ? 0.0 : 1.0;
 
     const holdRate = breathHeld ? 5.0 : 3.0;
     holdBlend += ((breathHeld ? 1 : 0) - holdBlend) * Math.min(1, holdRate * delta);
@@ -2188,7 +2196,7 @@ function animate(): void {
     {
       const kickT = Math.min(1, 10 * delta);
       kickRoll +=
-        (THREE.MathUtils.clamp(-moveImpX * 0.0004, -0.05, 0.05) * swayOn - kickRoll) * kickT;
+        (THREE.MathUtils.clamp(-moveImpX * 0.0004, -0.05, 0.05) * swayOn * panRoll - kickRoll) * kickT;
       kickPitch +=
         (THREE.MathUtils.clamp(-moveImpY * 0.0002, -0.03, 0.03) * swayOn - kickPitch) * kickT;
       moveImpX = 0;
@@ -2203,7 +2211,7 @@ function animate(): void {
     {
       const strafe = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
       const leanTarget = THREE.MathUtils.clamp(
-        (-strafe * 0.028 - mouseVelocityX * 0.12) * swayOn,
+        (-strafe * 0.028 - mouseVelocityX * 0.12 * panRoll) * swayOn,
         -0.06,
         0.06,
       );
@@ -2238,7 +2246,9 @@ function animate(): void {
       // physical sway; recoil still punches in.
       const tRX = swayOn * (-mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch + diffPitch);
       const tRY = baseRotY + swayOn * (-mouseVelocityX * 0.9 + breathRX + stepRY + diffYaw);
-      const tRZ = baseRotZ + swayOn * (-mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll + diffRoll);
+      // panRoll: cursor L/R panning never rolls the tube (bottom line of the
+      // reticle stays plumb); only organic roll sources and firing kick remain.
+      const tRZ = baseRotZ + swayOn * (-mouseVelocityX * 0.6 * panRoll + breathRR + stepRR + kickRoll * panRoll + diffRoll);
       const KR = 128;
       const CR = 17.0;
       const KP = 88;
