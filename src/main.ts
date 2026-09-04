@@ -798,6 +798,7 @@ const lensMat = new THREE.ShaderMaterial({
     uEyeRelief: { value: 1.0 },
     uZoomK: { value: 1.0 },
     uSwaySpeed: { value: 0.0 },
+    uReticleRoll: { value: 0.0 },
     uAdsWeight: { value: 0.0 },
     uTime: { value: 0.0 },
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
@@ -831,6 +832,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uEyeRelief;
     uniform float uZoomK;
     uniform float uSwaySpeed;
+    uniform float uReticleRoll;
     uniform float uAdsWeight;
     uniform float uTime;
     uniform vec2 uSunSide;
@@ -1096,10 +1098,10 @@ const lensMat = new THREE.ShaderMaterial({
       // FFP vs SFP: sniper reticle scales with magnification (first focal
       // plane — subtensions stay true at any zoom), ACOG stays fixed size
       // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
-      // NO RETICLE ROLL: the picture is counter-rolled (JS keeps the render
-      // camera level) and the etch is drawn straight in its space, so the
-      // crosshair is glued level to the image. Panning or rolling the gun
-      // never tilts the cross — it always stays plumb with the world.
+      // RETICLE ROLL: the etch is fixed to the gun, the eye is fixed to the
+      // head. When the tube rolls relative to the eye the cross tilts "/" vs
+      // "\" while the rotationally-symmetric lens image stays level. Rotate
+      // eye-space coords back into gun-space by -roll to draw that.
       vec2 rc = uv - reticleCenter;
       // Seat the etch IN the glass: bend it with the same ocular curvature as
       // the image (barrelWarp + barrelK), but a touch MORE so the etch reads
@@ -1107,9 +1109,12 @@ const lensMat = new THREE.ShaderMaterial({
       // second "layer" of the double-barrel. A flat overlay is what read as
       // "plastered".
       vec2 rcBent = barrelWarp(rc, barrelK * 1.12);
+      float cR = cos(uReticleRoll);
+      float sR = sin(uReticleRoll);
+      vec2 rcGun = vec2(cR * rcBent.x + sR * rcBent.y, -sR * rcBent.x + cR * rcBent.y);
       // Eye-distance size cue: closer eye reads the etch slightly larger.
-      vec2 p  = rcBent / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
-      vec2 pi = rcBent / imageScale;                    // illuminated reticle (fixed focal plane)
+      vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
+      vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
       bool isAcog = uOpticMode > 0.5;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
@@ -1564,6 +1569,30 @@ const CRESCENT_POWERS = [0.25, 0.5, 0.75, 1.0] as const;
 const CRESCENT_NAMES = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'] as const;
 let crescentPowerIdx = 1; // MEDIUM default
 
+// Weapon sway mode (X cycles 0→1→2):
+//   0 FREE        — full weapon sway: mouse-lag roll, breathing/heartbeat/
+//                   stride, auto head-lean, aim wander all live. Crosshair
+//                   rolls with the gun.
+//   1 LOCKED      — the rifle is rigid (no sway, no lean, no roll) so the
+//                   picture + crosshair sit rock-still and level. Because the
+//                   eye never leaves the optic axis the eye-relief crescent
+//                   is also gone.
+//   2 LOCKED+EYE  — same rigid geometry as LOCKED, but a PHANTOM eye-box
+//                   drift (fed by the same mouse-velocity / breathing /
+//                   stride signals) keeps the eye-relief crescent alive —
+//                   you get a planted reticle AND the scope still reads like
+//                   a real optic with an imperfect cheek weld.
+// Manual Q/E lean and firing recoil are intentionally left alone in all modes.
+const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE'] as const;
+let swayMode = 0;
+const SWAY_UI = {
+  el: document.getElementById('swaystate') as HTMLParagraphElement,
+};
+function applySwayUI(): void {
+  SWAY_UI.el.textContent = `Weapon sway: ${SWAY_MODE_NAMES[swayMode]} — X cycles`;
+}
+applySwayUI();
+
 const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
 weaponGroup.position.copy(hipPosition);
@@ -1732,6 +1761,10 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     zoomSwayOnly = !zoomSwayOnly;
     (document.getElementById('zoomstate') as HTMLParagraphElement).textContent =
       `Zoom blacken: ${zoomSwayOnly ? 'SWAY-ONLY (rest mild)' : 'FULL (rest blackens)'} — Z toggles`;
+  }
+  if (k === 'x') {
+    swayMode = (swayMode + 1) % SWAY_MODE_NAMES.length;
+    applySwayUI();
   }
   if (k === 'h') {
     crescentOpposite = !crescentOpposite;
@@ -1971,6 +2004,11 @@ function animate(): void {
     // moves — this only affects the shouldered position.
     adsPosition.x = rightEye ? ADS_X_RIGHT : 0.0;
     _anchor.lerpVectors(hipPosition, adsPosition, targetWeight);
+    // X sway mode gate: modes 1/2 (LOCKED / LOCKED+EYE) multiply the whole
+    // free-float / physical-sway layer by 0 so the rifle behaves rigidly.
+    // Only base rotations (hip→ADS easing), recoil impulses and manual Q/E
+    // lean survive.
+    const swayOn = swayMode === 0 ? 1.0 : 0.0;
 
     const holdRate = breathHeld ? 5.0 : 3.0;
     holdBlend += ((breathHeld ? 1 : 0) - holdBlend) * Math.min(1, holdRate * delta);
@@ -2076,7 +2114,7 @@ function animate(): void {
     wanderTimer -= delta;
     if (wanderTimer <= 0) {
       wanderTimer = 0.7 + Math.random() * 0.9;
-      const wA = 0.0022 * swayGate * lowK;
+      const wA = 0.0022 * swayGate * lowK * swayOn;
       wanderTX = (Math.random() * 2 - 1) * wA;
       wanderTY = (Math.random() * 2 - 1) * wA * 0.7;
     }
@@ -2107,9 +2145,9 @@ function animate(): void {
     const gaspW = Math.sin(time * 57.0) * ((gaspT / 0.6) * 0.004);
     // COMMON-MODE (head + gun together): aim wanders over the world, the eye
     // geometry is untouched so the lens stays clear.
-    const swayYaw = wanderCX + brY * brA + trY * 0.5;
-    const swayPitch = wanderCY + brP * brA + hbThump * hbAmp + trX * 0.5 + gaspW;
-    const swayRoll = brR * brA + hbThump * hbAmp * 0.4;
+    const swayYaw = (wanderCX + brY * brA + trY * 0.5) * swayOn;
+    const swayPitch = (wanderCY + brP * brA + hbThump * hbAmp + trX * 0.5 + gaspW) * swayOn;
+    const swayRoll = (brR * brA + hbThump * hbAmp * 0.4) * swayOn;
     playerGroup.rotation.y = headYaw + swayYaw * zoomSwayDamp;
     pitchObject.rotation.x = headPitch + swayPitch * zoomSwayDamp;
     // DIFFERENTIAL (gun floats against the head): a phase-lagged chest copy
@@ -2150,9 +2188,9 @@ function animate(): void {
     {
       const kickT = Math.min(1, 10 * delta);
       kickRoll +=
-        (THREE.MathUtils.clamp(-moveImpX * 0.0004, -0.05, 0.05) - kickRoll) * kickT;
+        (THREE.MathUtils.clamp(-moveImpX * 0.0004, -0.05, 0.05) * swayOn - kickRoll) * kickT;
       kickPitch +=
-        (THREE.MathUtils.clamp(-moveImpY * 0.0002, -0.03, 0.03) - kickPitch) * kickT;
+        (THREE.MathUtils.clamp(-moveImpY * 0.0002, -0.03, 0.03) * swayOn - kickPitch) * kickT;
       moveImpX = 0;
       moveImpY = 0;
     }
@@ -2160,14 +2198,12 @@ function animate(): void {
     // HEAD LEAN: auto (strafe + lateral flick) + manual Q/E. Applied to
     // pitchObject so head AND gun move together — the world (inside and
     // outside the scope) tilts and shifts for corner-peeking while the optic
-    // stays usable. The weapon adds its own EXTRA roll on top (below); both
-    // the scope image and the crosshair are roll-cancelled in the optic, so
-    // that extra roll only reads as gun model motion, never as a tilt of the
-    // sight picture.
+    // stays usable. The weapon adds its own EXTRA roll on top (below) — the
+    // difference between the two is what tilts the reticle against the image.
     {
       const strafe = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
       const leanTarget = THREE.MathUtils.clamp(
-        -strafe * 0.028 - mouseVelocityX * 0.12,
+        (-strafe * 0.028 - mouseVelocityX * 0.12) * swayOn,
         -0.06,
         0.06,
       );
@@ -2200,9 +2236,9 @@ function animate(): void {
       // on quick movements — that relative rotation is what pushes the eye off
       // axis and opens the eye-box crescent. Breathing + stride keep the slow
       // physical sway; recoil still punches in.
-      const tRX = -mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch + diffPitch;
-      const tRY = baseRotY - mouseVelocityX * 0.9 + breathRX + stepRY + diffYaw;
-      const tRZ = baseRotZ - mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll + diffRoll;
+      const tRX = swayOn * (-mouseVelocityY * 0.9 + breathRY + stepRX + kickPitch + diffPitch);
+      const tRY = baseRotY + swayOn * (-mouseVelocityX * 0.9 + breathRX + stepRY + diffYaw);
+      const tRZ = baseRotZ + swayOn * (-mouseVelocityX * 0.6 + breathRR + stepRR + kickRoll + diffRoll);
       const KR = 128;
       const CR = 17.0;
       const KP = 88;
@@ -2214,9 +2250,9 @@ function animate(): void {
       wRot.y += wRotVel.y * delta;
       wRot.z += wRotVel.z * delta;
       weaponGroup.rotation.set(wRot.x, wRot.y, wRot.z);
-      wVel.x += ((_anchor.x + bobX + driftX + floatX - wPos.x) * KP - wVel.x * CP) * delta;
-      wVel.y += ((_anchor.y + bobY + driftY + floatY - wPos.y) * KP - wVel.y * CP) * delta;
-      wVel.z += ((_anchor.z + bobZ + shoulderZ - wPos.z) * KP - wVel.z * CP) * delta;
+      wVel.x += ((_anchor.x + (bobX + driftX + floatX) * swayOn - wPos.x) * KP - wVel.x * CP) * delta;
+      wVel.y += ((_anchor.y + (bobY + driftY + floatY) * swayOn - wPos.y) * KP - wVel.y * CP) * delta;
+      wVel.z += ((_anchor.z + (bobZ + shoulderZ) * swayOn - wPos.z) * KP - wVel.z * CP) * delta;
       wPos.x += wVel.x * delta;
       wPos.y += wVel.y * delta;
       wPos.z += wVel.z * delta;
@@ -2227,14 +2263,14 @@ function animate(): void {
     }
     lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
 
-    // SCOPE IMAGE AND CROSSHAIR STAY LEVEL: the objective lenses are
-    // rotationally symmetric, so rolling the tube around its own optical
-    // axis must NOT rotate the world image. Counter-rolling the render
-    // camera here cancels the weapon-relative roll while preserving head
-    // lean from pitchObject. The etched reticle is drawn straight in the
-    // picture space, so the crosshair stays glued level too — it never
-    // rotates when you pan or roll the gun. Pitch/yaw flow through from the
-    // barrel; only roll is cancelled.
+    // SCOPE IMAGE STAYS LEVEL WHILE THE RETICLE ROLLS: the objective lenses
+    // are rotationally symmetric, so rolling the tube around its own optical
+    // axis must NOT rotate the world image — only the etched reticle (drawn
+    // in the shader, rotated by uReticleRoll) tilts with the gun. Counter-
+    // rolling the render camera here cancels the weapon-relative roll while
+    // preserving head lean from pitchObject, so horizon "/" vs "\" comes
+    // from the head and the cross "/" vs "\" comes from the gun. Correct on
+    // all 3 planes: pitch/yaw flow through from the barrel, roll does not.
     scopeCamera.rotation.z = -weaponGroup.rotation.z;
 
     // ---- TRUE 3D EYE VECTOR: where is the eye in tube space? ----
@@ -2280,8 +2316,24 @@ function animate(): void {
       const rawMag = Math.hypot(rawX, rawY);
       const distGain =
         0.55 + 0.45 * THREE.MathUtils.smoothstep(rawMag, 0.3, 1.5);
-      const softX = Math.tanh(rawX * 0.9) * distGain * zoomTighten;
-      const softY = Math.tanh(rawY * 0.9) * distGain * zoomTighten;
+      // PHANTOM EYE-BOX DRIFT (swayMode 2): the geometry is locked rigid so
+      // the real eye vector sits dead-centre and no crescent would ever show.
+      // Synthesize the cheek-weld error the sway would have produced from the
+      // same motion signals that feed the real one — mouse velocity (weapon
+      // lag), slow breathing and stride. Ramps in with currentAdsWeight so
+      // it only acts once you're shouldered, then rides the normal
+      // zoom-gain / operator-reseat pipeline below exactly like real sway.
+      const phK = swayMode === 2 ? currentAdsWeight : 0;
+      const phX =
+        (-mouseVelocityX * 2.0 +
+          Math.sin(time * 0.9 + seedC) * 0.02 +
+          Math.sin(walkPh) * 0.035 * moveBlend) * phK;
+      const phY =
+        (-mouseVelocityY * 1.4 +
+          Math.sin(time * 1.2 + seedA) * 0.02 +
+          Math.cos(walkPh * 2.0) * 0.03 * moveBlend) * phK;
+      const softX = (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
+      const softY = (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
       const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
       const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
       // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
@@ -2345,6 +2397,9 @@ function animate(): void {
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
+
+      // Reticle roll = weapon-relative roll (gun fixed etch vs head fixed eye)
+      lensMat.uniforms.uReticleRoll.value = weaponGroup.rotation.z;
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
