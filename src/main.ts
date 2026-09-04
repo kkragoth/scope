@@ -799,7 +799,6 @@ const lensMat = new THREE.ShaderMaterial({
     uZoomK: { value: 1.0 },
     uSwaySpeed: { value: 0.0 },
     uReticleRoll: { value: 0.0 },
-    uViewAngle: { value: new THREE.Vector2(0, 0) },
     uAdsWeight: { value: 0.0 },
     uTime: { value: 0.0 },
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
@@ -812,6 +811,8 @@ const lensMat = new THREE.ShaderMaterial({
     uSunFacing: { value: 0.0 },
     uReticleScale: { value: 1.0 },
     uDofRings: { value: 1.0 },
+    uCrescentSide: { value: 1.0 },
+    uCrescentPower: { value: 0.5 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -832,7 +833,6 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uZoomK;
     uniform float uSwaySpeed;
     uniform float uReticleRoll;
-    uniform vec2 uViewAngle;
     uniform float uAdsWeight;
     uniform float uTime;
     uniform vec2 uSunSide;
@@ -845,6 +845,8 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uSunFacing;
     uniform float uReticleScale;
     uniform float uDofRings;
+    uniform float uCrescentSide;
+    uniform float uCrescentPower;
     varying vec2 vUv;
 
     float hash21(vec2 p) {
@@ -857,15 +859,6 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 ba = b - a;
       float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
       return length(pa - ba * h);
-    }
-    // Elliptical radius of q around center c given tilt basis (dir/cos):
-    // parallel axis is foreshortened by tiltCos, so stretch it back before
-    // the circular comparison. Returns circular-equivalent radius.
-    float ellR(vec2 q, vec2 c, vec2 dir, float cosA) {
-      vec2 d = q - c;
-      float par = dot(d, dir);
-      vec2 perp = d - dir * par;
-      return length(vec2(par / max(cosA, 0.55), length(perp)));
     }
     // Radial barrel/fisheye warp around the optical axis. k < 0 barrels (the
     // classic scope "bulge"): center magnified, rim compressed and bowed. Two
@@ -940,26 +933,27 @@ const lensMat = new THREE.ShaderMaterial({
 
       float swayDist = length(uEyeOffset);
 
-      // ---- SIGHT SLIDE + WHISPER PARALLAX ----
-      // The world image is now ROTATED WITH THE GUN (the render camera is on
-      // the barrel), so any internal lateral slide is only the *parallax*
-      // whisper — the sway is FELT through the whole sight (picture + reticle
-      // slide together off-axis, so the crosshair never sits glued to centre).
-      vec2 rawSight = -uEyeOffset * 0.78;
-      float maxSight = uVignetteSize * 0.8;
-      vec2 sightC = length(rawSight) > maxSight ? normalize(rawSight) * maxSight : rawSight;
-      vec2 imageShift = -sightC;
-      vec2 imageCenter = sightC;
-      vec2 reticleCenter = sightC * uParallaxSens;
+      // ---- SIGHT STAYS PINNED (no lateral slide) ----
+      // The world image is rendered with the render camera ON the barrel, and
+      // the ocular projects it onto a focal plane the eye looks *into* — a
+      // distant scene has ~zero parallax, so the picture and the etched
+      // crosshair must NOT translate when the eye drifts off-axis. Sliding
+      // them (old rawSight/sightC) is what read as "a whole circle moving
+      // inside the scope". Instead the crosshair stays glued to tube centre
+      // and the ONLY off-axis cue is the eye-relief crescent (the exit-pupil
+      // shadow below, drawn against the fixed picture) plus aperture shrink /
+      // defocus / dimming — the way a real optic loses its eye box.
+      vec2 imageShift = vec2(0.0);
+      vec2 imageCenter = vec2(0.0);
+      vec2 reticleCenter = vec2(0.0);
 
-      // ---- 3D FORESHORTENING: tilted tube projects as an ellipse ----
-      // viewAngle = combined eye-offset + bore/eye angular mismatch (radians).
-      // Circles viewed at angle squash along the tilt direction: minor axis
-      // lies along the offset, major stays perpendicular. Diagonal eye error
-      // therefore yields a diagonally-tilted ellipse (the "/" vs "\" feel).
-      float tiltMag = length(uViewAngle);
-      vec2 tiltDir = tiltMag > 1e-4 ? uViewAngle / tiltMag : vec2(1.0, 0.0);
-      float tiltCos = cos(min(tiltMag, 0.65));
+      // ---- CIRCULAR FIELD STOP (no elliptical foreshortening) ----
+      // The ocular's field stop is a circle. Viewing it slightly off-axis does
+      // NOT squash it into an ellipse — the eye-relief cue that matters is the
+      // exit-pupil CRESCENT (below), a circular bite drawn against a circular
+      // picture. Elliptical foreshortening (old ellR/tiltCos) is exactly what
+      // read as "an ellipse image" instead of "a circle with a crescent", so it
+      // is gone: the field stop, the pupil and the crescent are all circles.
 
       // ---- EYE-RELIEF APERTURE (physical exit pupil) ----
       // relief 1.0 = eye seated at the exit pupil. Too far shrinks the picture
@@ -989,15 +983,12 @@ const lensMat = new THREE.ShaderMaterial({
       // stay full-size and full-bright when you're still. The zoom penalty
       // lives in the *error response* (uEyeOffset/uEyeRelief are amplified by
       // zoomTighten in JS), so it only bites when you sway, never when centered.
+      // The aperture is RELIEF-ONLY (distance): backing off shrinks the exit
+      // pupil, but a LATERAL eye drift must NOT shrink the picture. A centred
+      // disc that collapses as you pan is exactly the "tunnel vision" that
+      // looked wrong — the lateral cue is the exit-pupil CRESCENT below, and a
+      // fast swing thickens that crescent instead of shrinking the field.
       float currentAperture = min(exitR, uVignetteSize) * mix(0.35, 1.0, eyeBox);
-      // Eye-relief exaggeration (off-axis at high magnification): a magnified
-      // scope has a tiny exit pupil, so a FAST lateral swing clips a much
-      // bigger share of the field — the picture collapses toward a smaller,
-      // drifted circle floating in the dark of the eyepiece. Gated by uSwaySpeed
-      // so slow, deliberate mouse corrections stay full-size (easy to aim);
-      // only quick swings actually lose the eye box.
-      float eyeSwing = uSwaySpeed * swayDist * (0.6 + (uZoomK - 1.0) * 0.28);
-      currentAperture *= 1.0 - clamp(eyeBox * eyeSwing, 0.0, 0.55);
       float shadowK = uShadowHardness * mix(1.7, 0.75, clamp(2.0 - uEyeRelief, 0.0, 1.0));
       // zoomed glass punishes harder: edge hardens with magnification
       shadowK *= 1.0 + (uZoomK - 1.0) * 0.25;
@@ -1006,11 +997,11 @@ const lensMat = new THREE.ShaderMaterial({
       shadowK *= 1.0 + transit * 1.5;
       // reticle fades in LAST — off-axis eyes see no etch, only tunnel
       float etchVis = smoothstep(0.55, 0.98, uAdsWeight);
-      // off-axis transmission collapse: hip peephole runs dark, not full-bright.
-      // (uEyeOffset/uEyeRelief are ALREADY zoom-amplified in JS, so no uZoomK
-      // here — the "same sway = blacker at high zoom" comes free from that.)
+      // off-axis transmission: hip peephole runs dark, not full-bright. Dimming
+      // is tied to RELIEF DISTANCE (reliefErr) only — a lateral sway must NOT
+      // darken the whole picture (that was the "vignette on pan" read as wrong).
       float reliefDim = mix(0.25, 1.0, smoothstep(0.15, 0.95, uAdsWeight));
-      reliefDim /= 1.0 + swayDist * 1.2 + reliefErr * 0.8;
+      reliefDim /= 1.0 + reliefErr * 0.8;
 
       // ---- NEUTRAL GLASS + DEFOCUS: keep scope == world ----
       // Wrong relief or zoomed sway blurs the sight (eye relief you feel, not
@@ -1018,7 +1009,9 @@ const lensMat = new THREE.ShaderMaterial({
       // per-channel longitudinal taps added below. Computed before the
       // CA/distortion block so the axial color can ride on it.
       // (inputs already zoom-amplified in JS — no uZoomK re-multiply here.)
-      float blurMix = clamp(abs(uEyeRelief - 1.0) * 1.6 + swayDist * 0.8, 0.0, 1.0);
+      // Lateral sway keeps only a whisper of symmetric defocus; the crescent is
+      // the loud cue, not a full-frame blur.
+      float blurMix = clamp(abs(uEyeRelief - 1.0) * 1.6 + swayDist * 0.35, 0.0, 1.0);
 
       // Physical lateral CA: zero at center, grows to the rim. A real ocular's
       // transverse color makes a visible magenta/green fringe at the edge of
@@ -1082,7 +1075,7 @@ const lensMat = new THREE.ShaderMaterial({
       float dirtLightAmt = (0.002 + uSunIntensity * 0.025 + sweep * (0.01 + swayDist * 0.3)) * uDirtOpacity * 20.0;
       dirtLightAmt = min(dirtLightAmt, 0.03);
       vec3 dirtColor = vec3(1.0, 0.99, 0.96);
-      float inImage = 1.0 - smoothstep(currentAperture - shadowK, currentAperture, ellR(uv, imageCenter, tiltDir, tiltCos));
+      float inImage = 1.0 - smoothstep(currentAperture - shadowK, currentAperture, length(uv - imageCenter));
       sceneColor += dirtMask * dirtLightAmt * dirtColor * inImage;
 
       // Diagonal sun-streak flare across glass (scope glint), barely-there
@@ -1165,7 +1158,7 @@ const lensMat = new THREE.ShaderMaterial({
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
 
-      float reticleVis = (1.0 - smoothstep(currentAperture - shadowK, currentAperture, ellR(uv, imageCenter, tiltDir, tiltCos))) * etchVis;
+      float reticleVis = (1.0 - smoothstep(currentAperture - shadowK, currentAperture, length(uv - imageCenter))) * etchVis;
       sceneColor = mix(sceneColor, vec3(0.0), etchedMask * 0.82 * reticleVis);
       // illuminated core on top of the etch, with its OWN chromatic aberration:
       // the lit mask is sampled per channel at three radial scales so the
@@ -1239,9 +1232,9 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 farC = imageCenter - uEyeOffset * 0.55;
       float farR = currentAperture * 0.82;
 
-      float distImg = ellR(uv, nearC, tiltDir, tiltCos);
+      float distImg = length(uv - nearC);
       float distOcular = length(uv);
-      float dFar = ellR(uv, farC, tiltDir, tiltCos);
+      float dFar = length(uv - farC);
 
       float objectiveMask = smoothstep(nearR - shadowK, nearR, distImg);
 
@@ -1251,7 +1244,7 @@ const lensMat = new THREE.ShaderMaterial({
       // soft dimming crescent, so it never renders baffles/glass sheen inside
       // the shadow and never fades with a motion gate.
 
-      // Depth along the bore: solve f(t) = ellR(uv, lerp(nearC,farC,t)) -
+      // Depth along the bore: solve f(t) = length(uv, lerp(nearC,farC,t)) -
       // lerp(nearR,farR,t) = 0. f is ~linear in t for the small center slide,
       // so one linear solve is enough to index the wall from ocular (0) to
       // objective (1).
@@ -1344,14 +1337,15 @@ const lensMat = new THREE.ShaderMaterial({
         sceneColor = mix(sceneColor, vec3(0.42, 0.46, 0.50), veil * (1.0 - objectiveMask));
       }
 
-      // ---- EYE-BOX SHADOW: one soft crescent, pure eye geometry ----
+      // ---- EYE-BOX SHADOW: one crisp crescent, pure eye geometry ----
       // The picture the eye sees = field stop ∩ eye pupil. The pupil is a disc
-      // the same size as the field stop that travels OPPOSITE the eye drift;
-      // sliding it yields exactly ONE crescent that closes to nothing when the
-      // eye is centred (concentric equal discs → no overlap, no shadow). No
-      // motion gate anywhere — the darkness is a smooth function of how deep
-      // the pixel lies past the pupil arc, so a sway draws a gradiented crescent
-      // and stopping lets it shrink away instead of ghosting out at one opacity.
+      // the same size as the field stop that slides ALONG the eye drift (sign
+      // of uCrescentSide, toggled with H); sliding it yields exactly ONE
+      // crescent that closes to nothing when the eye is centred (concentric
+      // equal discs → no overlap, no shadow). No motion gate anywhere — the
+      // darkness is a smooth function of how deep the pixel lies past the pupil
+      // arc, so a sway draws a gradiented crescent and stopping lets it shrink
+      // away instead of ghosting out at one opacity.
       // Deliberately NOT masked to "inside the field stop": the dim is deepest
       // exactly at the picture edge (the bite is largest there), so it must run
       // all the way out to meet the black tube — an inField clip left a bright
@@ -1361,9 +1355,19 @@ const lensMat = new THREE.ShaderMaterial({
       {
         float eyeMag = length(uEyeOffset);
         vec2 eyeDir = eyeMag > 1e-4 ? uEyeOffset / eyeMag : vec2(0.0);
-        float slide = min(eyeMag * 1.7, 0.85);
-        vec2 pupilC = nearC - eyeDir * nearR * slide;
-        float bite = ellR(uv, pupilC, tiltDir, tiltCos) - nearR;
+        // Fast swings thicken the crescent (directional), never a smaller
+        // centred disc — uSwaySpeed now feeds the crescent's bite, replacing the
+        // old symmetric aperture collapse that read as tunnel vision.
+        // uCrescentPower (0..1) maps LOW/MEDIUM/HIGH/EXTREME onto the bite
+        // gain with a squared ramp so the top end dominates: LOW ≈ 1.7x, MEDIUM
+        // ≈ 3.2x, HIGH ≈ 5.6x, EXTREME ≈ 9x. EXTREME drives slide toward ~1.0,
+        // where the pupil has slid almost past the field stop and only a hair
+        // of sight picture survives — "almost impossible to see".
+        float swingBoost = 1.0 + uSwaySpeed * 1.2;
+        float crescentGain = mix(1.2, 9.0, uCrescentPower * uCrescentPower);
+        float slide = min(eyeMag * crescentGain * swingBoost, 0.98);
+        vec2 pupilC = nearC + eyeDir * nearR * slide * uCrescentSide;
+        float bite = length(uv - pupilC) - nearR;
         // Edge-attached gradient: darkest where the bite is deepest (at the
         // picture edge, against the tube), fading back to full brightness at
         // the pupil arc. The ramp width IS the max bite depth, so the shadow
@@ -1371,7 +1375,10 @@ const lensMat = new THREE.ShaderMaterial({
         // seam/ring left between the shadow and the tube.
         float biteMax = max(nearR * slide, 0.05 * nearR);
         float bb = clamp(max(bite, 0.0) / biteMax, 0.0, 1.0);
-        float shade = bb * bb * (3.0 - 2.0 * bb);
+        // Quintic smoothstep: steeper mid-band than cubic, so the crescent has
+        // a darker, more uniform core and a crisp inner arc instead of a soft
+        // gradient wash that read as a faint oval.
+        float shade = bb * bb * bb * (bb * (bb * 6.0 - 15.0) + 10.0);
         // only matters once the rifle is shouldered — hip keeps its dim peephole.
         float seatGain = smoothstep(0.25, 0.8, eyeBox);
         eyeBoxShadow = shade * seatGain;
@@ -1543,6 +1550,17 @@ const EYEBOX_NAMES = ['', 'CLEAN', 'SOFT', 'STICKY'] as const;
 // high magnification — the blackening only really bites when you are actually
 // swaying, where the full zoom amplification still applies.
 let zoomSwayOnly = true;
+// Crescent side (H): which side of the sight picture the eye-relief crescent
+// bites from relative to the eye's lateral drift.
+//   OPPOSITE — crescent appears on the side OPPOSITE the eye drift (default).
+//   FOLLOW   — crescent appears on the side the eye drifts toward (old look).
+let crescentOpposite = true;
+// Crescent power (P): how aggressively the eye-relief crescent bites for a
+// given eye offset. Cycles LOW → MEDIUM → HIGH → EXTREME, each mapping to a
+// 0..1 gain (uCrescentPower) that scales the crescent's slide.
+const CRESCENT_POWERS = [0.25, 0.5, 0.75, 1.0] as const;
+const CRESCENT_NAMES = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'] as const;
+let crescentPowerIdx = 1; // MEDIUM default
 
 const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
@@ -1713,6 +1731,18 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     (document.getElementById('zoomstate') as HTMLParagraphElement).textContent =
       `Zoom blacken: ${zoomSwayOnly ? 'SWAY-ONLY (rest mild)' : 'FULL (rest blackens)'} — Z toggles`;
   }
+  if (k === 'h') {
+    crescentOpposite = !crescentOpposite;
+    lensMat.uniforms.uCrescentSide.value = crescentOpposite ? 1.0 : -1.0;
+    (document.getElementById('cresstate') as HTMLParagraphElement).textContent =
+      `Crescent side: ${crescentOpposite ? 'OPPOSITE drift' : 'FOLLOW drift'} — H toggles`;
+  }
+  if (k === 'p') {
+    crescentPowerIdx = (crescentPowerIdx + 1) % CRESCENT_NAMES.length;
+    lensMat.uniforms.uCrescentPower.value = CRESCENT_POWERS[crescentPowerIdx];
+    (document.getElementById('crespower') as HTMLParagraphElement).textContent =
+      `Crescent power: ${CRESCENT_NAMES[crescentPowerIdx]} — P cycles`;
+  }
   if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
 });
@@ -1808,15 +1838,10 @@ const _sunSide = new THREE.Vector2();
 const _scopeQuat = new THREE.Quaternion();
 const _eyeWorld = new THREE.Vector3();
 const _eyeLocal = new THREE.Vector3();
-const _eyeQuat = new THREE.Quaternion();
-const _relQuat = new THREE.Quaternion();
-const _relEuler = new THREE.Euler();
-const _viewAngle = new THREE.Vector2();
 // OPERATOR LAG: the eye re-seats slower than geometry moves. Raw eye-vector
 // targets are smoothed before reaching the shader, so after a flick the
 // shadow blooms and the eye "takes a sec" to find the box again.
 const _eyeSm = new THREE.Vector2(0, 0);
-const _viewSm = new THREE.Vector2(0, 0);
 let _reliefSm = 1.0;
 // EYE-BOX SWING SPEED (0..1): how fast the rifle is currently being swung.
 // Slow deliberate corrections stay ≈ 0 (no eye-box exaggeration); quick flicks
@@ -2316,24 +2341,6 @@ function animate(): void {
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
-
-      // View angle = geometric eye direction + bore/eye angular mismatch.
-      // eyeDir gives the positional component (ex/ez), relEuler the angular
-      // component (tube tilted under a steady eye). Summed they orient the
-      // foreshortening ellipse, including diagonal "/" vs "\" tilts.
-      weaponGroup.getWorldQuaternion(_scopeQuat);
-      camera.getWorldQuaternion(_eyeQuat);
-      _relQuat.copy(_scopeQuat).invert().multiply(_eyeQuat);
-      _relEuler.setFromQuaternion(_relQuat, 'XYZ');
-      const eyeAngX = Math.atan2(_eyeLocal.x, Math.max(reliefDist, 1e-3));
-      const eyeAngY = Math.atan2(_eyeLocal.y, Math.max(reliefDist, 1e-3));
-      _viewAngle.set(
-        THREE.MathUtils.clamp(eyeAngX * 0.9 + _relEuler.y, -0.65, 0.65),
-        THREE.MathUtils.clamp(eyeAngY * 0.9 - _relEuler.x, -0.65, 0.65),
-      );
-      _viewSm.x += (_viewAngle.x - _viewSm.x) * Math.min(1, (Math.abs(_viewAngle.x) > Math.abs(_viewSm.x) ? 14 : 7) * delta);
-      _viewSm.y += (_viewAngle.y - _viewSm.y) * Math.min(1, (Math.abs(_viewAngle.y) > Math.abs(_viewSm.y) ? 14 : 7) * delta);
-      (lensMat.uniforms.uViewAngle.value as THREE.Vector2).copy(_viewSm);
 
       // Reticle roll = weapon-relative roll (gun fixed etch vs head fixed eye)
       lensMat.uniforms.uReticleRoll.value = weaponGroup.rotation.z;
