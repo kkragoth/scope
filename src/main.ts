@@ -2144,9 +2144,9 @@ function animate(): void {
     // magnified sight they read as jitter, not drift, so they are all but
     // switched off at the shoulder. Slow breath + wander carry the idle life.
     const hfK = isAiming ? 0.08 : 1.0;
-    // Shift gates nearly everything: a real hold leaves ~15% residual and a
-    // slowed, faded pulse — the sight picture goes still.
-    const steadyK = 1.0 - holdBlend * 0.85;
+    // Shift gates nearly everything: a deliberate hold leaves only a sliver of
+    // residual sway and a slowed, faded pulse — the sight picture goes ~still.
+    const steadyK = 1.0 - holdBlend * 0.93;
     const swayGate = swayAmp * steadyK;
     // Random-walk aim wander: retargets ~1/s, cruises there slowly. This is
     // the "can't hold perfectly still" — the crosshair roams the target.
@@ -2371,8 +2371,12 @@ function animate(): void {
       // the zoom-gain / operator-reseat pipeline below exactly like real sway.
       // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2) runs full
       // strength; FREE (mode 0) runs a gentler copy.
+      // HOLD BREATH (Shift): the cheek weld becomes deliberate — the synthetic
+      // error ramps to zero with holdBlend so the eye re-seats dead-centre and
+      // the crescent closes at ANY zoom while you're steadying.
       const phK =
         currentAdsWeight *
+        (1.0 - holdBlend) *
         (swayMode === 1 ? 0.0 : swayMode === 2 ? 1.0 : 0.6);
       const phX =
         (mouseVelocityX * 2.0 +
@@ -2423,9 +2427,11 @@ function animate(): void {
         let tgtX = eyeUEff;
         let tgtY = eyeVEff;
         if (eyeBoxMode === 2) {
+          // SOFT's standing wander is what stops the eye from re-seating fully;
+          // holding breath (Shift) lets the weld settle anyway.
           const wob =
             0.10 * (0.7 + 0.3 * Math.sin(time * 0.9 + seedA)) *
-            (isAiming ? 1.0 : 0.0);
+            (isAiming ? 1.0 : 0.0) * (1.0 - holdBlend);
           tgtX += Math.sin(time * 0.53 + seedB) * wob;
           tgtY += Math.cos(time * 0.41 + seedC) * wob * 0.8;
         }
@@ -2437,6 +2443,10 @@ function animate(): void {
         let releaseRate = 6.0;
         if (eyeBoxMode === 3) {
           releaseRate = isAiming ? (breathHeld ? 3.0 : 0.35) : 8.0;
+        } else if (breathHeld) {
+          // holding breath re-seats the eye fast: the crescent you had before
+          // steadying clears promptly instead of decaying over a beat
+          releaseRate = 12.0;
         }
         const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
         const relDev = Math.abs(reliefEff - 1);
