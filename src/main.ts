@@ -332,14 +332,15 @@ const weaponMat = new THREE.MeshStandardMaterial({
 // The scope body reads as polished black-anodized aluminum rather than the
 // receiver's parkerized steel — higher metalness + tighter gloss so the
 // ocular bell (the end facing the player) catches a faint sky reflection and
-// reads as a separate, reflective part of the rifle.
+// reads as a separate, reflective part of the rifle. Pushed glossy + high
+// env response so the tube rolls like a curved barrel in the sun.
 const scopeMat = new THREE.MeshStandardMaterial({
-  color: 0x2b2e33,
-  roughness: 0.3,
-  metalness: 0.92,
+  color: 0x17181b,
+  roughness: 0.32,
+  metalness: 0.9,
   side: THREE.DoubleSide,
   roughnessMap: makeMicronoiseTexture(),
-  envMapIntensity: 1.6,
+  envMapIntensity: 1.2,
 });
 
 // ---- Rifle: full-length barrel, receiver block, ring-mounted scope ----
@@ -1269,11 +1270,11 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 sunN = length(uSunSide) > 1e-4 ? normalize(uSunSide) : vec2(0.4, 0.65);
       vec2 eyeDirT = swayDist > 1e-4 ? uEyeOffset / swayDist : vec2(0.0);
 
-      // Matte anodized base; sun-side kiss only (a baffled tube never catches
-      // direct sun head-on), scaled by sunFacing so it dies facing away.
+      // Dark anodized base; sun-side kiss only, scaled by sunFacing so it
+      // dies facing away. Kept near-black — no white barrel crown.
       float sunSideLight = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 4.0);
       vec3 tubeWall = vec3(0.008, 0.008, 0.008)
-        + vec3(0.10, 0.088, 0.075) * sunSideLight * uSunFacing * 0.22;
+        + vec3(0.10, 0.088, 0.075) * sunSideLight * uSunFacing * 0.25;
 
       // FAR WALL (the hollow-tube cue): off-axis, the wall opposite the eye's
       // offset turns edge-on and catches ambient light. Directional, not radial
@@ -1283,12 +1284,11 @@ const lensMat = new THREE.ShaderMaterial({
         * (0.08 + min(swayDist * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
 
       // TRUE FRESNEL on the cylindrical wall: reflection peaks at grazing angle,
-      // which for a near-orthographic eye is the far wall (edge-on). Rolls with
-      // the sun and decays as the wall recedes toward the objective — the
-      // "looking down a glass tube" sheen, distinct from the matte baffles.
-      float fresnel = pow(farWall, 1.6) * (0.04 + 0.20 * uSunIntensity);
+      // which for a near-orthographic eye is the far wall (edge-on). Dark
+      // blue-grey sheen only — no white.
+      float fresnel = pow(farWall, 1.3) * (0.08 + 0.32 * uSunIntensity);
       float frSun = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-      tubeWall += vec3(0.13, 0.16, 0.19) * fresnel * (0.35 + 0.65 * frSun);
+      tubeWall += vec3(0.14, 0.17, 0.20) * fresnel * (0.35 + 0.65 * frSun);
 
       // Baffle ridges at fixed DEPTH: chirped so they bunch toward the objective
       // (perspective convergence) instead of the old radial sine that shimmered
@@ -1305,17 +1305,17 @@ const lensMat = new THREE.ShaderMaterial({
       // Sun catches the machined ridge crests at glancing angles.
       tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * transitBoost;
 
-      // Objective-bell crescent: thin bright lip right where the wall meets the
-      // sight picture, sun side only (the machined edge of the objective glass).
+      // Objective-bell crescent: thin lip right where the wall meets the
+      // sight picture, sun side only. Dim — no white ring.
       float crescentLine = 1.0 - smoothstep(0.0, 0.022 + outerSoft * 0.02, abs(distImg - nearR));
       float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-      tubeWall += vec3(1.0, 0.94, 0.84) * crescent * uSunFacing * 0.12;
+      tubeWall += vec3(0.45, 0.42, 0.38) * crescent * uSunFacing * 0.12;
 
       // Oily travelling sheen with sway (grazing glass edge, not lit paint).
-      float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.35;
-      tubeWall += vec3(0.09, 0.09, 0.09) * innerRefl;
+      float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.30;
+      tubeWall += vec3(0.08, 0.08, 0.08) * innerRefl;
 
-      // Objective glass (far rim) catches a faint coated-glass sky kiss where it
+      // Objective glass (far rim) catches a faint sky kiss where it
       // pokes out from behind the sight picture off-axis.
       float objLip = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.012, abs(dFar - farR));
       tubeWall += vec3(0.10, 0.115, 0.125) * objLip
@@ -1330,23 +1330,23 @@ const lensMat = new THREE.ShaderMaterial({
       {
         float fresSway = min(swayDist * 2.5, 1.0);
         float fresZoom = clamp((uZoomK - 1.0) * 0.25, 0.0, 1.0);
-        float fresBoost = (0.35 + 0.65 * fresSway) * (1.0 + fresZoom);
-        // objective fresnel: dark neutral reflection, faint cool lift at the
-        // rim, stronger off-axis / zoomed — sits behind the image like glass
+        // Slightly lifted base so glass reads centered, never milky/white.
+        float fresBoost = (0.50 + 0.65 * fresSway) * (1.0 + fresZoom);
+        // objective fresnel: dark neutral reflection, faint cool lift at rim
         float objR = distFromCenter / 0.5;                 // 0..1
         float cosInc = 1.0 / sqrt(1.0 + objR * objR * 3.0);
-        float objFres = pow(1.0 - cosInc, 4.0);
-        vec3 objRefl = mix(vec3(0.03, 0.035, 0.045), vec3(0.20, 0.24, 0.30), objFres);
+        float objFres = pow(1.0 - cosInc, 3.2);
+        vec3 objRefl = mix(vec3(0.03, 0.035, 0.045), vec3(0.24, 0.28, 0.34), objFres);
         sceneColor = mix(sceneColor, objRefl,
-          objFres * (0.05 + 0.14 * uSunIntensity) * fresBoost * (1.0 - objectiveMask));
+          clamp(objFres * (0.10 + 0.22 * uSunIntensity) * fresBoost, 0.0, 0.5) * (1.0 - objectiveMask));
         // MgF2 coating sheen: faint magenta/green, sun-side, sweeps with the eye
         vec2 coatDir = normalize(uSunSide + uEyeOffset * 5.0 + vec2(1e-4));
-        float sheenAmt = smoothstep(0.30, 0.5, distFromCenter) * (0.15 + 0.6 * uSunIntensity) * 0.05 * fresBoost;
+        float sheenAmt = smoothstep(0.28, 0.5, distFromCenter) * (0.15 + 0.6 * uSunIntensity) * 0.08 * fresBoost;
         vec3 coat = mix(vec3(0.5, 0.22, 0.45), vec3(0.22, 0.5, 0.30), 0.5 + 0.5 * dot(tubeN, coatDir));
         sceneColor += coat * sheenAmt * (1.0 - objectiveMask);
-        // sky fresnel veil: a whisper, mostly neutral, rim-only
-        float veil = pow(smoothstep(0.32, 0.5, distFromCenter), 2.0) * 0.045 * (0.3 + 0.7 * uSunIntensity) * fresBoost;
-        sceneColor = mix(sceneColor, vec3(0.42, 0.46, 0.50), veil * (1.0 - objectiveMask));
+        // sky fresnel veil: faint, neutral, rim-only
+        float veil = pow(smoothstep(0.30, 0.5, distFromCenter), 2.0) * 0.07 * (0.3 + 0.7 * uSunIntensity) * fresBoost;
+        sceneColor = mix(sceneColor, vec3(0.42, 0.46, 0.50), clamp(veil, 0.0, 0.4) * (1.0 - objectiveMask));
       }
 
       // ---- EYE-BOX SHADOW: one crisp crescent, pure eye geometry ----
@@ -1400,14 +1400,14 @@ const lensMat = new THREE.ShaderMaterial({
 
       vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
 
-      // ocular rim: hard clip + machined inner bevel + thin sun-line on edge
+      // ocular rim: hard clip + thin machined line, kept dark — no white ring
       float ocularShadow = smoothstep(0.485, 0.5, distOcular);
       float ringBand = 1.0 - smoothstep(0.0, 0.006 + outerSoft * 0.008, abs(distOcular - 0.48));
-      // bevel: hairline lit chamfer just inside the rim sells the metal edge
+      // bevel: hairline chamfer just inside the rim
       float bevel = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.010, abs(distOcular - 0.466));
       vec2 ocuN = distOcular > 1e-4 ? uv / distOcular : vec2(0.0, 1.0);
       float ringGlint = pow(max(dot(ocuN, sunN) * 0.5 + 0.5, 0.0), 3.0);
-      vec3 ringLight = vec3(0.92, 0.92, 0.92) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.45);
+      vec3 ringLight = vec3(0.45, 0.45, 0.45) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.40);
       // keep opposite side dark for roundness
       float ringShade = pow(max(dot(ocuN, -sunN) * 0.5 + 0.5, 0.0), 2.0);
       viewWithTunnel -= vec3(0.05) * ringBand * ringShade;
@@ -1415,8 +1415,8 @@ const lensMat = new THREE.ShaderMaterial({
       // shadow bites that side they must dim with it or they float as a bright
       // ring over the darkened picture.
       viewWithTunnel += ringLight * (1.0 - eyeBoxShadow);
-      // bevel chamfer catches a duller, broader light than the rim line
-      viewWithTunnel += vec3(0.10, 0.10, 0.105) * bevel * (0.25 + 0.45 * ringGlint) * (1.0 - eyeBoxShadow);
+      // bevel chamfer catches a dull, narrow light
+      viewWithTunnel += vec3(0.08, 0.08, 0.082) * bevel * (0.25 + 0.45 * ringGlint) * (1.0 - eyeBoxShadow);
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
@@ -1470,8 +1470,7 @@ function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMateri
       varying vec3 vWP;
       void main() {
         vP = uv * 2.0 - 1.0;
-        // fake spherical cap: dome along the outward face (eye side for the
-        // ocular, muzzle side for the objective) so reflections roll to rim
+        // fake spherical cap: gentle dome so reflections roll to rim
         float dome = uOcular > 0.5 ? 1.0 : -1.0;
         vec3 domeN = normalize(vec3(vP.x * 0.55, vP.y * 0.55, dome));
         vWN = normalize(mat3(modelMatrix) * domeN);
@@ -1497,7 +1496,7 @@ function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMateri
         float spec = pow(max(dot(N, H), 0.0), 180.0);
         // MgF2-style coating swing: magenta center → green rim
         vec3 coat = mix(vec3(0.45, 0.18, 0.6), vec3(0.2, 0.65, 0.45), r * r);
-        vec3 skyRef = mix(vec3(0.04, 0.05, 0.07), vec3(0.62, 0.68, 0.75), fres);
+        vec3 skyRef = mix(vec3(0.04, 0.05, 0.07), vec3(0.55, 0.60, 0.66), fres);
         float edgeGlow = smoothstep(0.85, 1.0, r) * 0.15;
         if (uOcular > 0.5) {
           // see-through: faint tint + fresnel veil + sun tick. Center stays
@@ -1508,7 +1507,7 @@ function makeGlassMaterial(ocular: boolean, reflect: number): THREE.ShaderMateri
           float alpha = clamp(0.03 + fres * 0.55 * uReflect + spec + edgeGlow, 0.0, 0.9);
           gl_FragColor = vec4(col, alpha);
         } else {
-          // front element: dark coated glass, mirrored sky + hot sun glint
+          // front element: dark coated glass, mirrored sky + sun glint
           vec3 col = vec3(0.008, 0.01, 0.013)
             + skyRef * uReflect
             + vec3(1.0, 0.95, 0.85) * spec * 1.6
