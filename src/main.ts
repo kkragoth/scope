@@ -1599,15 +1599,17 @@ let crescentPowerIdx = 1; // MEDIUM default
 //                   glass, the whole tube sits off-axis.
 // Manual Q/E lean and firing recoil are intentionally left alone in all modes.
 const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE', 'FREEAIM', 'BODY'] as const;
-let swayMode = 0;
+let swayMode = 4; // BODY default: physical housing lag with catch-up
 // FREEAIM translational state (lens UV units, ~vignette 0.485): chases a
 // mouse-velocity target fast, bleeds back to centre slow = catch-up feel.
 let freeOX = 0;
 let freeOY = 0;
 // BODY physical-lag state (meters, tube radius 0.052): housing offset that
-// trails the eye and re-seats. Kept < tube radius so the eye stays in glass.
+// trails the eye and re-seats. Travel can push past the rim on hard flicks.
+// Plus a whisper of PITCH tilt (up/down only — yaw/roll stay locked).
 let bodyLX = 0;
 let bodyLY = 0;
+let bodyRX = 0;
 const SWAY_UI = {
   el: document.getElementById('swaystate') as HTMLParagraphElement,
 };
@@ -1749,8 +1751,11 @@ function setOpticMode(acog: boolean): void {
   freeOY = 0;
   bodyLX = 0;
   bodyLY = 0;
+  bodyRX = 0;
   sniperGroup.position.set(0, 0, 0);
   acogGroup.position.set(0, 0, 0);
+  sniperGroup.rotation.set(0, 0, 0);
+  acogGroup.rotation.set(0, 0, 0);
   lensMat.uniforms.uEyeOffset.value.set(0, 0);
   lensMat.uniforms.uEyeRelief.value = 1.0;
   lensMat.uniforms.uSwaySpeed.value = 0.0;
@@ -2533,10 +2538,13 @@ function animate(): void {
       // picture never detaches, but the housing + lens + etch ride off-axis
       // as one unit and ease back. That off-axis housing IS the decentering:
       // the cross reads off-centre because the whole scope sits off-centre.
-      // Same asymmetric catch-up as FREEAIM, in meters (< tube radius).
+      // Same asymmetric catch-up as FREEAIM, in meters (wide travel can
+      // push past the rim on hard flicks).
       {
         const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend);
         // Flick right -> housing kicks left, flick up -> housing kicks down.
+        // Tight travel (±0.03, inside the 0.052 tube radius): the eye stays
+        // in glass, the box breathes instead of blacking out.
         const tgtX =
           THREE.MathUtils.clamp(-mouseVelocityX * 0.3, -0.03, 0.03) * gate +
           Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
@@ -2548,10 +2556,23 @@ function animate(): void {
         const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
         bodyLX += (tgtX - bodyLX) * rate;
         bodyLY += (tgtY - bodyLY) * rate;
+        // Pitch whisper (up/down only): same lag sign as the old weapon pitch
+        // (tRX = -velY), tilt trails vertical flicks and levels out on stop.
+        // Generous range (±0.09 rad, ~5°) so the nod reads clearly. No yaw,
+        // no roll — those read as broken scope.
+        const tgtRX =
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.9, -0.09, 0.09) * gate;
+        const rateR = Math.min(
+          1,
+          (Math.abs(tgtRX) > Math.abs(bodyRX) ? 18 : 2.8) * delta,
+        );
+        bodyRX += (tgtRX - bodyRX) * rateR;
         // No snap on mode exit: gate is 0 outside BODY so tgt is 0 and the
         // housing eases back through this same filter instead of popping.
         sniperGroup.position.set(bodyLX, bodyLY, 0);
         acogGroup.position.set(bodyLX, bodyLY, 0);
+        sniperGroup.rotation.set(bodyRX, 0, 0);
+        acogGroup.rotation.set(bodyRX, 0, 0);
       }
 
       // Reticle roll = weapon-relative roll in FREE only. All locked modes
