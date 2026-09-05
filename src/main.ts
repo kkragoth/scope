@@ -815,6 +815,7 @@ const lensMat = new THREE.ShaderMaterial({
     uDofRings: { value: 1.0 },
     uCrescentSide: { value: 1.0 },
     uCrescentPower: { value: 0.5 },
+    uOutlineShade: { value: 1.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -850,6 +851,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uDofRings;
     uniform float uCrescentSide;
     uniform float uCrescentPower;
+    uniform float uOutlineShade;
     varying vec2 vUv;
 
     float hash21(vec2 p) {
@@ -1241,15 +1243,18 @@ const lensMat = new THREE.ShaderMaterial({
       // "fix" the hip floor back up: a usable full-bright picture off-axis is
       // exactly what looked awful.
       vec2 nearC = imageCenter;
-      float nearR = currentAperture;
+      // Hairline bore: clamp the field stop tight to the ocular rim so the
+      // bright ring is tiny-tiny — never a wide white annulus even at hip.
+      float nearR = max(currentAperture, 0.472);
       vec2 farC = imageCenter - uEyeOffset * 0.55;
-      float farR = currentAperture * 0.82;
+      float farR = nearR * 0.965;
 
       float distImg = length(uv - nearC);
       float distOcular = length(uv);
       float dFar = length(uv - farC);
 
-      float objectiveMask = smoothstep(nearR - shadowK, nearR, distImg);
+      float maskEdge = min(shadowK, 0.006);
+      float objectiveMask = smoothstep(nearR - maskEdge, nearR, distImg);
 
       // NOTE: the eye-box shadow (below, applied just before the tunnel mix)
       // is NOT part of objectiveMask. The mask here is only the physical tube
@@ -1283,43 +1288,62 @@ const lensMat = new THREE.ShaderMaterial({
       tubeWall += vec3(0.11, 0.105, 0.095) * farWall
         * (0.08 + min(swayDist * 1.4, 0.6)) * (0.35 + 0.65 * uSunFacing);
 
-      // TRUE FRESNEL on the cylindrical wall: reflection peaks at grazing angle,
-      // which for a near-orthographic eye is the far wall (edge-on). Dark
-      // blue-grey sheen only — no white.
-      float fresnel = pow(farWall, 1.3) * (0.08 + 0.32 * uSunIntensity);
-      float frSun = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-      tubeWall += vec3(0.14, 0.17, 0.20) * fresnel * (0.35 + 0.65 * frSun);
+      // INFINITE-MIRROR FRESNEL: Schlick-style grazing reflectance on the
+      // cylindrical wall. F0 base so the wall is never flat black, and a
+      // (1-cos)^5 wall-grazing term so the ocular lip mirrors hardest and
+      // each bounce down the bore reflects dimmer — the receding-mirror read.
+      // Stays steel blue-grey, never paper white; rim line itself untouched.
+      float frSun = pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 4.0);
+      float lip = 1.0 - depth; // 1 at ocular lip → 0 deep at objective
+      float grazing = pow(1.0 - clamp(dot(tubeN, -eyeDirT) * 0.5 + 0.5, 0.0, 1.0), 2.0);
+      float F0 = 0.08 + 0.30 * uSunIntensity;
+      float fresnel = F0 + (1.0 - F0) * pow(clamp(farWall * 0.7 + lip * 0.6 + grazing * 0.4, 0.0, 1.0), 2.5);
+      fresnel *= 0.55 + 0.75 * uSunFacing * (0.4 + 0.6 * frSun) + 0.35 * uSunIntensity;
+      vec3 mirrorTint = mix(vec3(0.30, 0.36, 0.43), vec3(0.55, 0.50, 0.42), frSun * 0.55);
+      tubeWall += mirrorTint * fresnel * 0.85;
+
+      // Infinite bounces: thin repeating ring highlights converging down the
+      // bore, each dimmer than the last (pow falloff on lip). Chirped so they
+      // bunch toward the objective like real perspective reflections.
+      float bouncePh = (depth + depth * depth * 0.9) * 22.0 * 6.2831853;
+      float bounce1 = pow(0.5 + 0.5 * sin(bouncePh), 6.0);
+      float bounce2 = pow(0.5 + 0.5 * sin(bouncePh * 2.13 + 1.7), 10.0);
+      float bounceDecay = mix(0.25, 1.0, lip * lip);
+      vec3 bounceTint = mix(vec3(0.38, 0.45, 0.53), vec3(0.60, 0.54, 0.44), frSun * 0.6);
+      tubeWall += bounceTint * (bounce1 * 0.55 + bounce2 * 0.35) * fresnel * bounceDecay;
 
       // Baffle ridges at fixed DEPTH: chirped so they bunch toward the objective
-      // (perspective convergence) instead of the old radial sine that shimmered
-      // like a flat moiré. transitBoost lights them mid-shoulder and at zoom.
+      // instead of a flat moiré. transitBoost lights them mid-shoulder and zoom.
       float transitBoost = (1.0 + transit * 1.2) * (1.0 + (uZoomK - 1.0) * 0.3);
       float baffles = 0.5 + 0.5 * sin((depth + depth * depth * 0.6) * 26.0 * 6.2831853);
       baffles = mix(baffles, 0.5, outerSoft * 0.8);
-      tubeWall *= (0.80 + 0.20 * baffles);
-      // Depth falloff: the objective end falls darker (the tube's length reads).
-      tubeWall *= mix(1.0, 0.55, depth);
-      // Atmospheric depth haze: cool scatter at the deep end, strongest at the
-      // far lip, dying toward the ocular — the bore reads as a receding volume.
-      tubeWall += vec3(0.02, 0.026, 0.035) * (1.0 - depth) * (0.3 + 0.5 * uSunIntensity);
-      // Sun catches the machined ridge crests at glancing angles.
-      tubeWall += vec3(0.5, 0.44, 0.38) * pow(baffles, 8.0) * sunSideLight * uSunFacing * 0.12 * transitBoost;
+      // Mirror bore: crests catch light, troughs mirror dark — deeper contrast
+      tubeWall *= (0.62 + 0.38 * baffles);
+      // Depth falloff, gentler so deep bounces stay visible (infinite read)
+      tubeWall *= mix(1.0, 0.72, depth);
+      // Cool scatter at the deep end + warm sun on the crests
+      tubeWall += vec3(0.03, 0.038, 0.05) * (1.0 - depth) * (0.3 + 0.6 * uSunIntensity);
+      tubeWall += vec3(0.55, 0.48, 0.40) * pow(baffles, 3.0) * sunSideLight * uSunFacing * 0.30 * transitBoost;
 
-      // Objective-bell crescent: thin lip right where the wall meets the
-      // sight picture, sun side only. Dim — no white ring.
-      float crescentLine = 1.0 - smoothstep(0.0, 0.022 + outerSoft * 0.02, abs(distImg - nearR));
+      // Hairline radial fade: only the innermost sliver of wall stays lit,
+      // everything further out falls to near-black — tiny-tiny ring, no disc.
+      float beyond = max(distImg - nearR, 0.0);
+      float hairline = exp(-beyond * 220.0);
+      tubeWall *= mix(0.10, 1.0, hairline);
+
+      // Objective-bell crescent: hairline lip only.
+      float crescentLine = 1.0 - smoothstep(0.0, 0.006 + outerSoft * 0.006, abs(distImg - nearR));
       float crescent = crescentLine * pow(max(dot(tubeN, sunN) * 0.5 + 0.5, 0.0), 6.0);
-      tubeWall += vec3(0.45, 0.42, 0.38) * crescent * uSunFacing * 0.12;
+      tubeWall += vec3(0.45, 0.42, 0.38) * crescent * uSunFacing * 0.12 * hairline;
 
       // Oily travelling sheen with sway (grazing glass edge, not lit paint).
       float innerRefl = pow(max(dot(tubeN, sweepDir) * 0.5 + 0.5, 0.0), 12.0) * swayDist * 0.30;
-      tubeWall += vec3(0.08, 0.08, 0.08) * innerRefl;
+      tubeWall += vec3(0.08, 0.08, 0.08) * innerRefl * hairline;
 
-      // Objective glass (far rim) catches a faint sky kiss where it
-      // pokes out from behind the sight picture off-axis.
-      float objLip = 1.0 - smoothstep(0.0, 0.008 + outerSoft * 0.012, abs(dFar - farR));
+      // Objective glass (far rim) hairline kiss only.
+      float objLip = 1.0 - smoothstep(0.0, 0.003 + outerSoft * 0.004, abs(dFar - farR));
       tubeWall += vec3(0.10, 0.115, 0.125) * objLip
-        * (0.10 + 0.30 * uSunIntensity) * (0.4 + 0.6 * etchVis);
+        * (0.10 + 0.30 * uSunIntensity) * (0.4 + 0.6 * etchVis) * hairline;
 
       // ---- LAYERED GLASS (subtle, near-neutral) ----
       // A scope is a stack of coated elements; each reflects a LITTLE. Keep
@@ -1398,25 +1422,28 @@ const lensMat = new THREE.ShaderMaterial({
         sceneColor *= 1.0 - eyeBoxShadow;
       }
 
-      vec3 viewWithTunnel = mix(sceneColor, tubeWall, objectiveMask);
+      // O-toggle: does the eye-box crescent blacken the bore/rim too
+      // (realistic ON — the pupil clips everything) or leave the outline lit?
+      vec3 tubeDimmed = tubeWall * (1.0 - eyeBoxShadow * uOutlineShade);
+      vec3 viewWithTunnel = mix(sceneColor, tubeDimmed, objectiveMask);
 
-      // ocular rim: hard clip + thin machined line, kept dark — no white ring
-      float ocularShadow = smoothstep(0.485, 0.5, distOcular);
-      float ringBand = 1.0 - smoothstep(0.0, 0.006 + outerSoft * 0.008, abs(distOcular - 0.48));
+      // ocular rim: hairline only — tiny-tiny
+      float ocularShadow = smoothstep(0.488, 0.5, distOcular);
+      float ringBand = 1.0 - smoothstep(0.0, 0.0025 + outerSoft * 0.003, abs(distOcular - 0.483));
       // bevel: hairline chamfer just inside the rim
-      float bevel = 1.0 - smoothstep(0.0, 0.010 + outerSoft * 0.010, abs(distOcular - 0.466));
+      float bevel = 1.0 - smoothstep(0.0, 0.004 + outerSoft * 0.004, abs(distOcular - 0.476));
       vec2 ocuN = distOcular > 1e-4 ? uv / distOcular : vec2(0.0, 1.0);
       float ringGlint = pow(max(dot(ocuN, sunN) * 0.5 + 0.5, 0.0), 3.0);
       vec3 ringLight = vec3(0.45, 0.45, 0.45) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.40);
       // keep opposite side dark for roundness
       float ringShade = pow(max(dot(ocuN, -sunN) * 0.5 + 0.5, 0.0), 2.0);
       viewWithTunnel -= vec3(0.05) * ringBand * ringShade;
-      // the machined rim lights live just inside the FOV edge; when the eye-box
-      // shadow bites that side they must dim with it or they float as a bright
-      // ring over the darkened picture.
-      viewWithTunnel += ringLight * (1.0 - eyeBoxShadow);
+      // the machined rim lights live just inside the FOV edge; gated by
+      // uOutlineShade so O can leave them lit while the picture darkens.
+      float rimGate = 1.0 - eyeBoxShadow * uOutlineShade;
+      viewWithTunnel += ringLight * rimGate;
       // bevel chamfer catches a dull, narrow light
-      viewWithTunnel += vec3(0.08, 0.08, 0.082) * bevel * (0.25 + 0.45 * ringGlint) * (1.0 - eyeBoxShadow);
+      viewWithTunnel += vec3(0.08, 0.08, 0.082) * bevel * (0.25 + 0.45 * ringGlint) * rimGate;
 
       vec3 finalColor = mix(viewWithTunnel, vec3(0.0), ocularShadow);
 
@@ -1573,6 +1600,10 @@ let crescentOpposite = true;
 const CRESCENT_POWERS = [0.25, 0.5, 0.75, 1.0] as const;
 const CRESCENT_NAMES = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'] as const;
 let crescentPowerIdx = 1; // MEDIUM default
+// Outline shading (O): does the eye-box crescent also blacken the bore/rim
+// white outline? Real glass would (the pupil clips everything), but leaving
+// the outline lit reads better — toggle to compare.
+let outlineShade = true;
 
 // Weapon sway mode (X cycles 0→1→2→3→4→5):
 //   0 FREE        — full weapon sway: mouse-lag roll, breathing/heartbeat/
@@ -1834,6 +1865,12 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     lensMat.uniforms.uCrescentPower.value = CRESCENT_POWERS[crescentPowerIdx];
     (document.getElementById('crespower') as HTMLParagraphElement).textContent =
       `Crescent power: ${CRESCENT_NAMES[crescentPowerIdx]} — P cycles`;
+  }
+  if (k === 'o') {
+    outlineShade = !outlineShade;
+    lensMat.uniforms.uOutlineShade.value = outlineShade ? 1.0 : 0.0;
+    (document.getElementById('outlinestate') as HTMLParagraphElement).textContent =
+      `Outline shade: ${outlineShade ? 'ON (crescent dims rim)' : 'OFF (rim stays lit)'} — O toggles`;
   }
   if (k === 'r') startReload();
   if (k === 'shift') breathHeld = true;
