@@ -799,6 +799,7 @@ const lensMat = new THREE.ShaderMaterial({
     uZoomK: { value: 1.0 },
     uSwaySpeed: { value: 0.0 },
     uReticleRoll: { value: 0.0 },
+    uReticleOffset: { value: new THREE.Vector2(0, 0) },
     uAdsWeight: { value: 0.0 },
     uTime: { value: 0.0 },
     uSunSide: { value: new THREE.Vector2(0.4, 0.65) },
@@ -833,6 +834,7 @@ const lensMat = new THREE.ShaderMaterial({
     uniform float uZoomK;
     uniform float uSwaySpeed;
     uniform float uReticleRoll;
+    uniform vec2 uReticleOffset;
     uniform float uAdsWeight;
     uniform float uTime;
     uniform vec2 uSunSide;
@@ -945,7 +947,11 @@ const lensMat = new THREE.ShaderMaterial({
       // defocus / dimming — the way a real optic loses its eye box.
       vec2 imageShift = vec2(0.0);
       vec2 imageCenter = vec2(0.0);
-      vec2 reticleCenter = vec2(0.0);
+      // FREEAIM translational offset: the etch slides U/D/L/R inside a
+      // frozen picture (no roll, no image swing) and eases back to centre
+      // when the mouse stops. Driven from JS, clamped to stay well inside
+      // the glass.
+      vec2 reticleCenter = uReticleOffset;
 
       // ---- CIRCULAR FIELD STOP (no elliptical foreshortening) ----
       // The ocular's field stop is a circle. Viewing it slightly off-axis does
@@ -1569,7 +1575,7 @@ const CRESCENT_POWERS = [0.25, 0.5, 0.75, 1.0] as const;
 const CRESCENT_NAMES = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME'] as const;
 let crescentPowerIdx = 1; // MEDIUM default
 
-// Weapon sway mode (X cycles 0→1→2):
+// Weapon sway mode (X cycles 0→1→2→3):
 //   0 FREE        — full weapon sway: mouse-lag roll, breathing/heartbeat/
 //                   stride, auto head-lean, aim wander all live. Crosshair
 //                   rolls with the gun.
@@ -1582,9 +1588,26 @@ let crescentPowerIdx = 1; // MEDIUM default
 //                   stride signals) keeps the eye-relief crescent alive —
 //                   you get a planted reticle AND the scope still reads like
 //                   a real optic with an imperfect cheek weld.
+//   3 FREEAIM     — rigid picture, NO roll, but the etch slides U/D/L/R
+//                   inside the glass on mouse motion (gun lags the eye) and
+//                   eases back to centre after you stop — translational
+//                   free-aim, no torque rotation.
+//   4 BODY        — same idea but PHYSICAL: the scope housing itself trails
+//                   the eye (position lag with catch-up) while the rendered
+//                   picture stays on the aim line. The off-centre housing is
+//                   WHY the cross reads off-centre — etch stays glued to the
+//                   glass, the whole tube sits off-axis.
 // Manual Q/E lean and firing recoil are intentionally left alone in all modes.
-const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE'] as const;
+const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE', 'FREEAIM', 'BODY'] as const;
 let swayMode = 0;
+// FREEAIM translational state (lens UV units, ~vignette 0.485): chases a
+// mouse-velocity target fast, bleeds back to centre slow = catch-up feel.
+let freeOX = 0;
+let freeOY = 0;
+// BODY physical-lag state (meters, tube radius 0.052): housing offset that
+// trails the eye and re-seats. Kept < tube radius so the eye stays in glass.
+let bodyLX = 0;
+let bodyLY = 0;
 const SWAY_UI = {
   el: document.getElementById('swaystate') as HTMLParagraphElement,
 };
@@ -1722,9 +1745,16 @@ function setOpticMode(acog: boolean): void {
   _eyeSm.set(0, 0);
   _reliefSm = 1.0;
   _swaySpeed = 0.0;
+  freeOX = 0;
+  freeOY = 0;
+  bodyLX = 0;
+  bodyLY = 0;
+  sniperGroup.position.set(0, 0, 0);
+  acogGroup.position.set(0, 0, 0);
   lensMat.uniforms.uEyeOffset.value.set(0, 0);
   lensMat.uniforms.uEyeRelief.value = 1.0;
   lensMat.uniforms.uSwaySpeed.value = 0.0;
+  (lensMat.uniforms.uReticleOffset.value as THREE.Vector2).set(0, 0);
   updateAmmoUI();
 }
 
@@ -2013,11 +2043,13 @@ function animate(): void {
     // moves — this only affects the shouldered position.
     adsPosition.x = rightEye ? ADS_X_RIGHT : 0.0;
     _anchor.lerpVectors(hipPosition, adsPosition, targetWeight);
-    // X sway mode gate: modes 1/2 (LOCKED / LOCKED+EYE) multiply the whole
-    // free-float / physical-sway layer by 0 so the rifle behaves rigidly.
-    // Only base rotations (hip→ADS easing), recoil impulses and manual Q/E
-    // lean survive.
+    // X sway mode gate: modes 1/2/3/4 (LOCKED / LOCKED+EYE / FREEAIM / BODY)
+    // multiply the whole free-float / physical-sway layer by 0 so the rifle
+    // behaves rigidly. Only base rotations (hip→ADS easing), recoil impulses
+    // and manual Q/E lean survive.
     const swayOn = swayMode === 0 ? 1.0 : 0.0;
+    const freeaimOn = swayMode === 3 ? 1.0 : 0.0;
+    const bodyOn = swayMode === 4 ? 1.0 : 0.0;
     // Plumb reticle while ADSing: panning the cursor is a YAW, and a yaw must
     // never roll the rifle — rolling the tube on a lateral sweep is what tips
     // the crosshair's bottom line away from straight-down. The little mouse-
@@ -2369,15 +2401,20 @@ function animate(): void {
       // panning to re-aim stays 1:1 at any zoom while the optic still reads as
       // an imperfect cheek weld. Ramps in with currentAdsWeight, then rides
       // the zoom-gain / operator-reseat pipeline below exactly like real sway.
-      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2) runs full
-      // strength; FREE (mode 0) runs a gentler copy.
+      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2), FREEAIM
+      // (mode 3) and BODY (mode 4) run full strength; FREE (mode 0) runs a
+      // gentler copy.
       // HOLD BREATH (Shift): the cheek weld becomes deliberate — the synthetic
       // error ramps to zero with holdBlend so the eye re-seats dead-centre and
       // the crescent closes at ANY zoom while you're steadying.
       const phK =
         currentAdsWeight *
         (1.0 - holdBlend) *
-        (swayMode === 1 ? 0.0 : swayMode === 2 ? 1.0 : 0.6);
+        (swayMode === 1
+          ? 0.0
+          : swayMode === 2 || swayMode === 3 || swayMode === 4
+            ? 1.0
+            : 0.6);
       const phX =
         (mouseVelocityX * 2.0 +
           Math.sin(time * 0.9 + seedC) * 0.02 +
@@ -2460,8 +2497,67 @@ function animate(): void {
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
 
-      // Reticle roll = weapon-relative roll (gun fixed etch vs head fixed eye)
-      lensMat.uniforms.uReticleRoll.value = weaponGroup.rotation.z;
+      // FREEAIM translational etch: mouse flick displaces the cross U/D/L/R
+      // (gun lags the eye), release eases it back to centre = catch-up.
+      // No roll, no picture swing — imageShift stays 0, only reticleCenter
+      // moves. Gated by ADS + breath hold so a steady hold re-centres.
+      // Wide travel: the cross can roam ~40% of the glass radius before the
+      // clamp catches it — same order as the phantom crescent bite.
+      {
+        const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend);
+        // Flick right -> cross kicks left, flick up -> cross kicks down.
+        const tgtX =
+          THREE.MathUtils.clamp(-mouseVelocityX * 2.2, -0.2, 0.2) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.006 * gate;
+        const tgtY =
+          THREE.MathUtils.clamp(mouseVelocityY * 1.8, -0.2, 0.2) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.006 * gate;
+        const curMX = Math.hypot(freeOX, freeOY);
+        const tgtMX = Math.hypot(tgtX, tgtY);
+        // Fast attack (follows the flick), slow release (catch-up after stop).
+        const rate = Math.min(1, (tgtMX > curMX ? 18 : 2.8) * delta);
+        freeOX += (tgtX - freeOX) * rate;
+        freeOY += (tgtY - freeOY) * rate;
+        if (freeaimOn === 0) {
+          freeOX = 0;
+          freeOY = 0;
+        }
+        (lensMat.uniforms.uReticleOffset.value as THREE.Vector2).set(
+          freeOX,
+          freeOY,
+        );
+      }
+
+      // BODY physical housing lag: the tube itself trails the eye and
+      // re-seats — scopeCamera stays rigid on the aim line so the WORLD
+      // picture never detaches, but the housing + lens + etch ride off-axis
+      // as one unit and ease back. That off-axis housing IS the decentering:
+      // the cross reads off-centre because the whole scope sits off-centre.
+      // Same asymmetric catch-up as FREEAIM, in meters (< tube radius).
+      {
+        const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend);
+        // Flick right -> housing kicks left, flick up -> housing kicks down.
+        const tgtX =
+          THREE.MathUtils.clamp(-mouseVelocityX * 0.3, -0.03, 0.03) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
+        const tgtY =
+          THREE.MathUtils.clamp(mouseVelocityY * 0.24, -0.03, 0.03) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.0015 * gate;
+        const curM = Math.hypot(bodyLX, bodyLY);
+        const tgtM = Math.hypot(tgtX, tgtY);
+        const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
+        bodyLX += (tgtX - bodyLX) * rate;
+        bodyLY += (tgtY - bodyLY) * rate;
+        // No snap on mode exit: gate is 0 outside BODY so tgt is 0 and the
+        // housing eases back through this same filter instead of popping.
+        sniperGroup.position.set(bodyLX, bodyLY, 0);
+        acogGroup.position.set(bodyLX, bodyLY, 0);
+      }
+
+      // Reticle roll = weapon-relative roll in FREE only. All locked modes
+      // (incl. FREEAIM / BODY) keep the etch plumb — no torque rotation.
+      lensMat.uniforms.uReticleRoll.value =
+        swayMode === 0 ? weaponGroup.rotation.z : 0.0;
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
