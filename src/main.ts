@@ -1631,23 +1631,22 @@ const MIRROR_BRIGHT = 1.0;
 //                   stride signals) keeps the eye-relief crescent alive —
 //                   you get a planted reticle AND the scope still reads like
 //                   a real optic with an imperfect cheek weld.
-//   3 FREEAIM     — rigid picture, NO roll, but the etch slides U/D/L/R
-//                   inside the glass on mouse motion (gun leads the eye) and
-//                   eases back to centre after you stop — translational
-//                   free-aim, no torque rotation.
-//   4 BODY        — same idea but PHYSICAL: the scope housing itself trails
-//                   the eye (position lag with catch-up) while the rendered
-//                   picture stays on the aim line. The off-centre housing is
-//                   WHY the cross reads off-centre — etch stays glued to the
-//                   glass, the whole tube sits off-axis.
-//   5 BODY+FREE  — combo: housing shift (BODY) + etch slide (FREEAIM) both
-//                   live at once. The cross decenters by the SUM of the two,
-//                   so hard flicks travel widest here.
+//   3 FREEAIM     — the crosshair rides the barrel and leads the eye: on a
+//                   flick it swings off the picture centre (up to a corner)
+//                   and eases back to centre as the body catches up. The
+//                   picture stays rigid — the eye↔weapon↔crosshair rotation
+//                   read through the eyepiece.
+//   4 BODY        — the scope housing itself physically slides off the eye
+//                   line (position lag with catch-up) while the picture stays
+//                   rigid. The off-centre housing shifts the whole optic.
+//   5 BODY+FREE  — both live at once: crosshair lead + housing slide. The
+//                   cross decenters by the SUM, so hard flicks travel widest.
 // Manual Q/E lean and firing recoil are intentionally left alone in all modes.
 const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE', 'FREEAIM', 'BODY', 'BODY+FREE'] as const;
-let swayMode = 5; // BODY+FREE default: housing shift + etch slide combined
-// FREEAIM translational state (lens UV units, ~vignette 0.485): chases a
+let swayMode = 5; // BODY+FREE default: crosshair lead + housing slide combined
+// FREEAIM aim-lead state (lens UV units, ~vignette 0.485): chases a
 // mouse-velocity target fast, bleeds back to centre slow = catch-up feel.
+// Drives the reticle (aim) offset AND the eye-box crescent below.
 let freeOX = 0;
 let freeOY = 0;
 // BODY physical-lag state (meters, tube radius 0.052): housing offset that
@@ -2609,10 +2608,13 @@ function animate(): void {
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
 
-      // FREEAIM translational etch: mouse flick displaces the cross U/D/L/R
-      // (gun leads the eye), release eases it back to centre = catch-up.
-      // No roll, no picture swing — imageShift stays 0, only reticleCenter
-      // moves. Gated by ADS + breath hold so a steady hold re-centres.
+      // FREEAIM aim-lead offset (lens UV units): the crosshair IS the weapon's
+      // point of aim riding the barrel. On a flick the barrel rotates ahead of
+      // the eye (eye–weapon–crosshair rotation), so through the eyepiece the
+      // crosshair reads off the picture centre — toward a corner on hard
+      // flicks — while the picture stays rigid. Release eases it back to
+      // centre = the body catching up. Gated by ADS + breath hold so a steady
+      // hold re-centres.
       // ZOOM-LINKED (freeZoom): 0 at lowest mag (fov 15, no movement at all),
       // full only at highest mag (fov 1). Travel RANGE (freeRange) also grows
       // with zoom so the cross rides further off-centre the more magnified the
@@ -2626,7 +2628,7 @@ function animate(): void {
         // a planted rifle still reads as a living cheek weld.
         const freeRange = THREE.MathUtils.lerp(0.035, 0.19, freeZoom);
         // Flick right -> cross kicks right, flick up -> cross kicks up:
-        // the etch moves AHEAD of the look direction, not behind it.
+        // the barrel leads AHEAD of the look direction, not behind it.
         const tgtX =
           THREE.MathUtils.clamp(mouseVelocityX * 2.2, -freeRange, freeRange) * gate +
           Math.sin(time * 0.9 + seedB) * 0.01 * gate;
@@ -2643,18 +2645,21 @@ function animate(): void {
           freeOX = 0;
           freeOY = 0;
         }
+        // The crosshair line rides the barrel: push the etched reticle around
+        // inside the (rigid) picture so it visibly leaves the centre while the
+        // weapon leads.
         (lensMat.uniforms.uReticleOffset.value as THREE.Vector2).set(
           freeOX,
           freeOY,
         );
       }
 
-      // BODY physical housing lag: the tube itself leads the eye and
-      // re-seats — scopeCamera stays rigid on the aim line so the WORLD
-      // picture never detaches, but the housing + lens + etch ride off-axis
-      // ahead of the look as one unit and ease back. That off-axis housing IS
-      // the decentering: the cross reads ahead because the whole scope sits
-      // ahead of the look direction.
+      // BODY physical housing lag: the scope housing itself slides off the eye
+      // line and re-seats — scopeCamera stays rigid on the aim line so the
+      // WORLD picture never detaches, but the housing + lens ride off-axis
+      // ahead of the look as one unit and ease back. This is the whole-optic
+      // slide in front of the eye (weapon slide), added on top of the FREEAIM
+      // crosshair lead so hard flicks travel widest in BODY+FREE.
       // ZOOM-LINKED like FREEAIM (freeZoom): 0 at lowest mag, tamed travel so
       // the combo stays inside the glass even fully zoomed.
       {
@@ -2692,25 +2697,26 @@ function animate(): void {
 
       // ---- CRESCENT FOLLOWS THE CROSSHAIR (FREEAIM/BODY/BODY+FREE) ----
       // The eye offset that drives the exit-pupil shadow is derived from how
-      // far the cross actually sits off the aim line right now: reticle slide
-      // (freeaim) + the housing's physical lag (body) converted into the same
-      // lens-UV units. The eye offset points the SAME way the cross decentred:
-      // under the default OPPOSITE crescent side the shader then bites the
-      // shadow on the FAR side of the cross — a trailing crescent that keeps
-      // the aim/target area clean (the old gun-lag look). N still lets you
-      // ride the shadow up under the crosshair itself instead.
+      // far the cross actually sits off the aim line right now — the total
+      // weapon lead: the etched crosshair riding the barrel (freeaim) plus the
+      // housing slide (body) converted into lens-UV (uv = 0.5 * shift/tubeR).
+      // The eye offset points the SAME way the cross decentred: under the
+      // default OPPOSITE crescent side the shader then bites the shadow on the
+      // FAR side of the cross — a trailing crescent that keeps the aim/target
+      // area clean. N still lets you ride the shadow up under the crosshair
+      // itself instead.
       // Stored here for the NEXT frame, where the eye smoothing consumes it.
       {
         const tubeR = acogActive ? 0.0355 : tubeRadius;
-        const bx = (bodyLX / tubeR) * 0.5;
-        const by = (bodyLY / tubeR) * 0.5;
+        const bodyUvX = (bodyLX / tubeR) * 0.5;
+        const bodyUvY = (bodyLY / tubeR) * 0.5;
         _crossEyeX = THREE.MathUtils.clamp(
-          (freeOX + bx) * CROSS_EYE_GAIN,
+          (freeOX + bodyUvX) * CROSS_EYE_GAIN,
           -CROSS_EYE_MAX,
           CROSS_EYE_MAX,
         );
         _crossEyeY = THREE.MathUtils.clamp(
-          (freeOY + by) * CROSS_EYE_GAIN,
+          (freeOY + bodyUvY) * CROSS_EYE_GAIN,
           -CROSS_EYE_MAX,
           CROSS_EYE_MAX,
         );
