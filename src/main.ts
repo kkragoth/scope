@@ -1999,6 +1999,28 @@ let _crossEyeX = 0;
 let _crossEyeY = 0;
 const CROSS_EYE_MAX = 0.42;
 const CROSS_EYE_GAIN = 1.0;
+// SHOULDER PIVOT: the whole-rifle lead/body motion rotates about the point
+// where the butt meets the shoulder (below & behind the receiver, in the
+// weapon's local frame) instead of sliding the gun sideways as one rigid
+// block. The rear stays planted there while the muzzle sweeps the big arc —
+// that's the "fixed on the end, front moving" feel. SCOPE_ARM_Z is the
+// pivot-to-scope distance along the bore used to convert a lateral metre at
+// the scope into a rotation angle. SHOULDER_LEAD_GAIN is the fraction of the
+// reticle lead that is ALSO physically swung as barrel (rest stays on the
+// drawn crosshair so it keeps reading as free-aim).
+const SHOULDER_PIVOT = new THREE.Vector3(0, -0.28, 0.42);
+const SHOULDER_ARM_Z = 0.42;
+const SHOULDER_LEAD_GAIN = 0.35;
+// Extra whip on the shoulder rotation: the muzzle is far past the pivot, so
+// scaling the ANGLE (not the scope offset) lets it sweep a visibly bigger arc
+// than the scope actually travels. >1 = more rotation about the shoulder; the
+// scope/glass and the eye-box crescent shift by the same factor so everything
+// stays in proportion. Pivot closer to the rear (SHOULDER_ARM_Z smaller) also
+// demands a larger angle for the same scope offset = more rotation for the
+// same visible crosshair lead.
+const SHOULDER_SWING_GAIN = 1.9;
+const _leadEuler = new THREE.Euler(0, 0, 0, 'XYZ');
+const _leadPivot = new THREE.Vector3();
 let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
@@ -2688,18 +2710,37 @@ function animate(): void {
         );
         bodyRX += (tgtRX - bodyRX) * rateR;
         // No snap on mode exit: gate is 0 outside BODY so tgt is 0 and the
-        // housing eases back through this same filter instead of popping.
-        sniperGroup.position.set(bodyLX, bodyLY, 0);
-        acogGroup.position.set(bodyLX, bodyLY, 0);
-        sniperGroup.rotation.set(bodyRX, 0, 0);
-        acogGroup.rotation.set(bodyRX, 0, 0);
+        // offsets ease back through this same filter instead of popping.
+        // Apply the combined lead as a SHOULDER-PIVOT rotation rather than a
+        // parallel slide: rotate the whole rifle about the shoulder point so
+        // the rear/butt stays planted and the muzzle sweeps the arc, while the
+        // scope (mounted ~SCOPE_ARM_Z ahead of the pivot) lands at the
+        // requested lateral offset. A small share of the reticle lead is swung
+        // as barrel too, so the front visibly points the way the crosshair
+        // rides — the rest stays as the drawn crosshair for the free-aim read.
+        const tubeR = acogActive ? 0.0355 : tubeRadius;
+        const scopeSx =
+          (bodyLX + freeOX * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        const scopeSy =
+          (bodyLY + freeOY * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        const leadPitch = scopeSy / SHOULDER_ARM_Z;
+        const leadYaw = -scopeSx / SHOULDER_ARM_Z;
+        _leadEuler.set(leadPitch + bodyRX, leadYaw, 0);
+        // position = pivot - R*pivot  =>  the shoulder point never moves, all
+        // parts rotate around it (muzzle swings most, rear barely at all).
+        _leadPivot.copy(SHOULDER_PIVOT).applyEuler(_leadEuler);
+        sniperGroup.position.copy(SHOULDER_PIVOT).sub(_leadPivot);
+        sniperGroup.rotation.copy(_leadEuler);
+        acogGroup.position.copy(sniperGroup.position);
+        acogGroup.rotation.copy(_leadEuler);
       }
 
       // ---- CRESCENT FOLLOWS THE CROSSHAIR (FREEAIM/BODY/BODY+FREE) ----
       // The eye offset that drives the exit-pupil shadow is derived from how
-      // far the cross actually sits off the aim line right now — the total
-      // weapon lead: the etched crosshair riding the barrel (freeaim) plus the
-      // housing slide (body) converted into lens-UV (uv = 0.5 * shift/tubeR).
+      // far the cross actually sits off the eye line right now: the drawn
+      // crosshair lead (freeaim, in lens-UV) PLUS the physical glass-centre
+      // shift produced by the shoulder-pivot rotation of the whole rifle
+      // (body lag + swung lead share). uv = 0.5 * shift / tubeR.
       // The eye offset points the SAME way the cross decentred: under the
       // default OPPOSITE crescent side the shader then bites the shadow on the
       // FAR side of the cross — a trailing crescent that keeps the aim/target
@@ -2708,15 +2749,19 @@ function animate(): void {
       // Stored here for the NEXT frame, where the eye smoothing consumes it.
       {
         const tubeR = acogActive ? 0.0355 : tubeRadius;
-        const bodyUvX = (bodyLX / tubeR) * 0.5;
-        const bodyUvY = (bodyLY / tubeR) * 0.5;
+        const glassShiftX =
+          (bodyLX + freeOX * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        const glassShiftY =
+          (bodyLY + freeOY * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        const glassUvX = (glassShiftX / tubeR) * 0.5;
+        const glassUvY = (glassShiftY / tubeR) * 0.5;
         _crossEyeX = THREE.MathUtils.clamp(
-          (freeOX + bodyUvX) * CROSS_EYE_GAIN,
+          (freeOX + glassUvX) * CROSS_EYE_GAIN,
           -CROSS_EYE_MAX,
           CROSS_EYE_MAX,
         );
         _crossEyeY = THREE.MathUtils.clamp(
-          (freeOY + bodyUvY) * CROSS_EYE_GAIN,
+          (freeOY + glassUvY) * CROSS_EYE_GAIN,
           -CROSS_EYE_MAX,
           CROSS_EYE_MAX,
         );
