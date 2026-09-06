@@ -1798,6 +1798,8 @@ function setOpticMode(acog: boolean): void {
   bodyLX = 0;
   bodyLY = 0;
   bodyRX = 0;
+  _crossEyeX = 0;
+  _crossEyeY = 0;
   sniperGroup.position.set(0, 0, 0);
   acogGroup.position.set(0, 0, 0);
   sniperGroup.rotation.set(0, 0, 0);
@@ -1989,6 +1991,15 @@ let _reliefSm = 1.0;
 // Slow deliberate corrections stay ≈ 0 (no eye-box exaggeration); quick flicks
 // go to ~1 and linger a beat while the eye re-seats.
 let _swaySpeed = 0.0;
+// Crosshair-driven eye (FREEAIM/BODY/BODY+FREE): the exit-pupil crescent is
+// keyed to how far the crosshair sits off-centre, not to raw mouse motion.
+// The crosshair state (reticle slide + housing lag) is eased later in the
+// frame, so its eye-space equivalent is stored here and consumed by the eye
+// smoothing at the top of the NEXT frame.
+let _crossEyeX = 0;
+let _crossEyeY = 0;
+const CROSS_EYE_MAX = 0.42;
+const CROSS_EYE_GAIN = 1.0;
 let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
@@ -2486,9 +2497,11 @@ function animate(): void {
       // panning to re-aim stays 1:1 at any zoom while the optic still reads as
       // an imperfect cheek weld. Ramps in with currentAdsWeight, then rides
       // the zoom-gain / operator-reseat pipeline below exactly like real sway.
-      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2), FREEAIM
-      // (mode 3), BODY (mode 4) and BODY+FREE (mode 5) run full strength;
-      // FREE (mode 0) runs a gentler copy.
+      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2) and FREE
+      // (mode 0, gentler) run this phantom copy. FREEAIM / BODY / BODY+FREE
+      // (modes 3/4/5) SKIP the phantom — their crescent is driven directly by
+      // the crosshair's off-centre position further down, so the shadow tracks
+      // the visible reticle decentration 1:1 instead of raw mouse motion.
       // HOLD BREATH (Shift): the cheek weld becomes deliberate — the synthetic
       // error ramps to zero with holdBlend so the eye re-seats dead-centre and
       // the crescent closes at ANY zoom while you're steadying.
@@ -2546,11 +2559,19 @@ function animate(): void {
       //            fast, re-shouldering starts a fresh weld, and holding breath
       //            (SHIFT) lets you deliberately re-seat back into the box.
       {
+        // X modes 3/4/5 (FREEAIM / BODY / BODY+FREE) drive the eye-box from
+        // the CROSSHAIR's off-centre position instead of a raw mouse-velocity
+        // phantom: the crescent appears because the cross sits off the aim
+        // line, and it closes as the body catches up and the cross eases back
+        // to centre. The crosshair's own easing (18 attack / 2.8 catch-up)
+        // carries the motion, so the eye just mirrors it exactly — shadow and
+        // crosshair move as one. Modes 0/2 keep the synthetic phantom eye.
+        const crossDrive = swayMode === 3 || swayMode === 4 || swayMode === 5;
         const aimRising = isAiming && !prevAiming;
         prevAiming = isAiming;
-        let tgtX = eyeUEff;
-        let tgtY = eyeVEff;
-        if (eyeBoxMode === 2) {
+        let tgtX = crossDrive ? _crossEyeX : eyeUEff;
+        let tgtY = crossDrive ? _crossEyeY : eyeVEff;
+        if (!crossDrive && eyeBoxMode === 2) {
           // SOFT's standing wander is what stops the eye from re-seating fully;
           // holding breath (Shift) lets the weld settle anyway.
           const wob =
@@ -2572,7 +2593,11 @@ function animate(): void {
           // steadying clears promptly instead of decaying over a beat
           releaseRate = 12.0;
         }
-        const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
+        // crossDrive: snap to the crosshair-derived offset (already eased by
+        // the freeaim/body filters) so the crescent reads 1:1 with the cross.
+        const eyeRate = crossDrive
+          ? 1.0
+          : Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
         const relDev = Math.abs(reliefEff - 1);
         const relCur = Math.abs(_reliefSm - 1);
         const relRate = Math.min(1, (relDev > relCur ? 12 : 5) * delta);
@@ -2589,18 +2614,25 @@ function animate(): void {
       // No roll, no picture swing — imageShift stays 0, only reticleCenter
       // moves. Gated by ADS + breath hold so a steady hold re-centres.
       // ZOOM-LINKED (freeZoom): 0 at lowest mag (fov 15, no movement at all),
-      // full only at highest mag (fov 1). Tamed gains so BODY+FREE combo
-      // doesn't slam the glass — max ~0.14 UV even fully zoomed.
+      // full only at highest mag (fov 1). Travel RANGE (freeRange) also grows
+      // with zoom so the cross rides further off-centre the more magnified the
+      // view — same angular free-aim, more of the glass.
       {
         const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
+        // Travel range grows with zoom: a fixed angular free-aim spans more of
+        // the magnified glass, so at high power the cross rides much further
+        // off-centre (near-zero range when fully zoomed out). The breathing
+        // wander keeps a small misalignment (and whisper of crescent) alive so
+        // a planted rifle still reads as a living cheek weld.
+        const freeRange = THREE.MathUtils.lerp(0.035, 0.19, freeZoom);
         // Flick right -> cross kicks right, flick up -> cross kicks up:
         // the etch moves AHEAD of the look direction, not behind it.
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 1.4, -0.14, 0.14) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.004 * gate;
+          THREE.MathUtils.clamp(mouseVelocityX * 2.2, -freeRange, freeRange) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.01 * gate;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 1.15, -0.14, 0.14) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.004 * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 1.9, -freeRange, freeRange) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.01 * gate;
         const curMX = Math.hypot(freeOX, freeOY);
         const tgtMX = Math.hypot(tgtX, tgtY);
         // Fast attack (follows the flick), slow release (catch-up after stop).
@@ -2627,13 +2659,14 @@ function animate(): void {
       // the combo stays inside the glass even fully zoomed.
       {
         const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
+        const bodyRange = THREE.MathUtils.lerp(0.002, 0.026, freeZoom);
         // Flick right -> housing kicks right, flick up -> housing kicks up.
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 0.18, -0.022, 0.022) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.001 * gate;
+          THREE.MathUtils.clamp(mouseVelocityX * 0.3, -bodyRange, bodyRange) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.15, -0.022, 0.022) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.001 * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.26, -bodyRange, bodyRange) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.0015 * gate;
         const curM = Math.hypot(bodyLX, bodyLY);
         const tgtM = Math.hypot(tgtX, tgtY);
         const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
@@ -2655,6 +2688,32 @@ function animate(): void {
         acogGroup.position.set(bodyLX, bodyLY, 0);
         sniperGroup.rotation.set(bodyRX, 0, 0);
         acogGroup.rotation.set(bodyRX, 0, 0);
+      }
+
+      // ---- CRESCENT FOLLOWS THE CROSSHAIR (FREEAIM/BODY/BODY+FREE) ----
+      // The eye offset that drives the exit-pupil shadow is derived from how
+      // far the cross actually sits off the aim line right now: reticle slide
+      // (freeaim) + the housing's physical lag (body) converted into the same
+      // lens-UV units. The eye offset points the SAME way the cross decentred:
+      // under the default OPPOSITE crescent side the shader then bites the
+      // shadow on the FAR side of the cross — a trailing crescent that keeps
+      // the aim/target area clean (the old gun-lag look). N still lets you
+      // ride the shadow up under the crosshair itself instead.
+      // Stored here for the NEXT frame, where the eye smoothing consumes it.
+      {
+        const tubeR = acogActive ? 0.0355 : tubeRadius;
+        const bx = (bodyLX / tubeR) * 0.5;
+        const by = (bodyLY / tubeR) * 0.5;
+        _crossEyeX = THREE.MathUtils.clamp(
+          (freeOX + bx) * CROSS_EYE_GAIN,
+          -CROSS_EYE_MAX,
+          CROSS_EYE_MAX,
+        );
+        _crossEyeY = THREE.MathUtils.clamp(
+          (freeOY + by) * CROSS_EYE_GAIN,
+          -CROSS_EYE_MAX,
+          CROSS_EYE_MAX,
+        );
       }
 
       // Reticle roll = weapon-relative roll in FREE only. All locked modes
