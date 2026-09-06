@@ -2019,6 +2019,14 @@ const SHOULDER_LEAD_GAIN = 0.35;
 // demands a larger angle for the same scope offset = more rotation for the
 // same visible crosshair lead.
 const SHOULDER_SWING_GAIN = 1.9;
+// Cap how far the pivot rotation is allowed to shift the scope/glass centre,
+// so hard flicks never shove the sight circle off the view axis. The muzzle
+// keeps swinging because its lever arm past the pivot is ~3-4x the scope's.
+const SHOULDER_MAX_SCOPE = 0.034;
+// Single source of truth for the applied swing (set in the body block, read by
+// the crescent feed a few lines below) so rotation and shadow can never drift.
+let _scopeSwingX = 0;
+let _scopeSwingY = 0;
 const _leadEuler = new THREE.Euler(0, 0, 0, 'XYZ');
 const _leadPivot = new THREE.Vector3();
 let headLean = 0.0;
@@ -2723,8 +2731,20 @@ function animate(): void {
           (bodyLX + freeOX * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
         const scopeSy =
           (bodyLY + freeOY * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
-        const leadPitch = scopeSy / SHOULDER_ARM_Z;
-        const leadYaw = -scopeSx / SHOULDER_ARM_Z;
+        // Clamp so the glass never leaves the view axis; store the applied
+        // swing for the crescent feed below (single source of truth).
+        _scopeSwingX = THREE.MathUtils.clamp(
+          scopeSx,
+          -SHOULDER_MAX_SCOPE,
+          SHOULDER_MAX_SCOPE,
+        );
+        _scopeSwingY = THREE.MathUtils.clamp(
+          scopeSy,
+          -SHOULDER_MAX_SCOPE,
+          SHOULDER_MAX_SCOPE,
+        );
+        const leadPitch = _scopeSwingY / SHOULDER_ARM_Z;
+        const leadYaw = -_scopeSwingX / SHOULDER_ARM_Z;
         _leadEuler.set(leadPitch + bodyRX, leadYaw, 0);
         // position = pivot - R*pivot  =>  the shoulder point never moves, all
         // parts rotate around it (muzzle swings most, rear barely at all).
@@ -2749,12 +2769,12 @@ function animate(): void {
       // Stored here for the NEXT frame, where the eye smoothing consumes it.
       {
         const tubeR = acogActive ? 0.0355 : tubeRadius;
-        const glassShiftX =
-          (bodyLX + freeOX * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
-        const glassShiftY =
-          (bodyLY + freeOY * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
-        const glassUvX = (glassShiftX / tubeR) * 0.5;
-        const glassUvY = (glassShiftY / tubeR) * 0.5;
+        // Glass-centre shift in lens-UV from the SAME clamped swing applied to
+        // the rotation above (uv = 0.5 * shift / tubeR). Total crosshair
+        // decentre = drawn lead (freeOX) + that glass shift; the eye offset
+        // mirrors it exactly so shadow and crosshair move together.
+        const glassUvX = (_scopeSwingX / tubeR) * 0.5;
+        const glassUvY = (_scopeSwingY / tubeR) * 0.5;
         _crossEyeX = THREE.MathUtils.clamp(
           (freeOX + glassUvX) * CROSS_EYE_GAIN,
           -CROSS_EYE_MAX,
