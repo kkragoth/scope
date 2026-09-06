@@ -514,16 +514,18 @@ for (const rz of RING_Z) {
   weaponGroup.add(ring);
 }
 
-// ---- Optic assemblies: sniper rifle vs ACOG carbine ----
+// ---- Optic assemblies: sniper rifle vs ACOG carbine vs EOTECH rifle ----
 // Everything built above belongs to the sniper rifle; move it under
-// sniperGroup so keys 1/2 can swap whole models, not just reticles.
+// sniperGroup so keys 1/2/3 can swap whole models, not just reticles.
 const sniperGroup = new THREE.Group();
 const acogGroup = new THREE.Group();
-weaponGroup.add(sniperGroup, acogGroup);
+const eotechGroup = new THREE.Group();
+weaponGroup.add(sniperGroup, acogGroup, eotechGroup);
 for (const m of [...weaponGroup.children]) {
-  if (m !== sniperGroup && m !== acogGroup) sniperGroup.add(m);
+  if (m !== sniperGroup && m !== acogGroup && m !== eotechGroup) sniperGroup.add(m);
 }
 acogGroup.visible = false;
+eotechGroup.visible = false;
 
 // ACOG carbine: shorter barrel + handguard, compact prism housing on a
 // single cantilever base (authentic ACOG mounting), glowing fiber strip.
@@ -609,12 +611,201 @@ acogGroup.visible = false;
   acogGroup.add(fiber);
 }
 
+// EOTECH rifle: carbine-length AR with a 1x holographic sight. No
+// magnification, no eye relief — the window renders through the SAME lens
+// shader as the scopes (uOpticMode 2), ridden CLOSE to the eye on a riser.
+// Material is assigned after lensMat exists (declared below); weaponMat is a
+// placeholder so module evaluation order stays safe.
+const EOTECH_GLASS_Z = 0.05;
+let eotechGlass: THREE.Mesh;
+let eotechFilm: THREE.ShaderMaterial;
+{
+  const eBarrelGeo = new THREE.CylinderGeometry(0.023, 0.02, 0.9, 32);
+  eBarrelGeo.rotateX(Math.PI / 2);
+  const eBarrel = new THREE.Mesh(eBarrelGeo, weaponMat);
+  eBarrel.position.set(0, BORE_Y, -0.58);
+  eBarrel.layers.set(1);
+  eotechGroup.add(eBarrel);
+
+  const eBrakeGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.07, 24);
+  eBrakeGeo.rotateX(Math.PI / 2);
+  const eBrake = new THREE.Mesh(eBrakeGeo, weaponMat);
+  eBrake.position.set(0, BORE_Y, -1.05);
+  eBrake.layers.set(1);
+  eotechGroup.add(eBrake);
+
+  const eGuard = new THREE.Mesh(new RoundedBoxGeometry(0.085, 0.095, 0.5, 2, 0.01), weaponMat);
+  eGuard.position.set(0, -0.15, -0.32);
+  eGuard.layers.set(1);
+  eotechGroup.add(eGuard);
+
+  const eRecv = new THREE.Mesh(new RoundedBoxGeometry(0.075, 0.16, 0.55, 2, 0.01), weaponMat);
+  eRecv.position.set(0, -0.225, 0.22);
+  eRecv.layers.set(1);
+  eotechGroup.add(eRecv);
+
+  const eRail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.015, 0.42), weaponMat);
+  eRail.position.set(0, -0.1375, 0.05);
+  eRail.layers.set(1);
+  eotechGroup.add(eRail);
+
+  const eMag = new THREE.Mesh(new RoundedBoxGeometry(0.06, 0.1, 0.12, 2, 0.008), weaponMat);
+  eMag.position.set(0, -0.345, 0.15);
+  eMag.layers.set(1);
+  eotechGroup.add(eMag);
+
+  const eTrig = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.035, 0.014), weaponMat);
+  eTrig.position.set(0, -0.315, 0.32);
+  eTrig.layers.set(1);
+  eotechGroup.add(eTrig);
+
+  // Fat electronics base (the big EOTech bottom) with a transverse battery
+  // tube up front, QD jaws below, and a compact boxy hood on top — not a
+  // long slim tube. Optic axis stays y = 0 so ADS stays centered.
+  const eBase = new THREE.Mesh(new RoundedBoxGeometry(0.066, 0.075, 0.15, 2, 0.008), weaponMat);
+  eBase.position.set(0, -0.072, 0.015);
+  eBase.layers.set(1);
+  eotechGroup.add(eBase);
+
+  // Transverse AA battery tube across the front-bottom, sitting proud of
+  // the base so the bulky bottom reads, + knurled side cap.
+  const tubeGeo = new THREE.CylinderGeometry(0.019, 0.019, 0.075, 20);
+  tubeGeo.rotateZ(Math.PI / 2);
+  const eTube = new THREE.Mesh(tubeGeo, weaponMat);
+  eTube.position.set(0, -0.103, -0.035);
+  eTube.layers.set(1);
+  eotechGroup.add(eTube);
+  const capGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.012, 20);
+  capGeo.rotateZ(Math.PI / 2);
+  const btnMat = new THREE.MeshStandardMaterial({ color: 0x1c1d20, roughness: 0.5, metalness: 0.6 });
+  const eCap = new THREE.Mesh(capGeo, btnMat);
+  eCap.position.set(0.0445, -0.103, -0.035);
+  eCap.layers.set(1);
+  eotechGroup.add(eCap);
+
+  // Solid mount neck: the base must not float above the rail on two thin
+  // side plates with daylight between — one clamp block rooting base to rail.
+  const eNeck = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.025, 0.1), weaponMat);
+  eNeck.position.set(0, -0.12, 0.015);
+  eNeck.layers.set(1);
+  eotechGroup.add(eNeck);
+
+  // QD mount jaws straddling the rail + throw lever on the left
+  const jawGeo = new THREE.BoxGeometry(0.012, 0.03, 0.09);
+  for (const jx of [-0.033, 0.033]) {
+    const jaw = new THREE.Mesh(jawGeo, weaponMat);
+    jaw.position.set(jx, -0.125, 0.015);
+    jaw.layers.set(1);
+    eotechGroup.add(jaw);
+  }
+  // Hood shade (EOTECH-only): the cavity seen obliquely through the window
+  // must read as matter, never a black ellipse — lifted base + emissive so
+  // the shadowed interior holds dark-grey instead of pitch black.
+  const hoodMat = new THREE.MeshStandardMaterial({
+    color: 0x3a3d43,
+    roughness: 0.62,
+    metalness: 0.45,
+    emissive: 0x0e0e11,
+  });
+  const lever = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.016, 0.055), hoodMat);
+  lever.position.set(-0.043, -0.12, 0.03);
+  lever.rotation.x = 0.45;
+  lever.layers.set(1);
+  eotechGroup.add(lever);
+
+  const wallT = 0.008;
+  const hoodH = 0.078;
+  const hoodW = 0.076;
+  // Hood runs exactly as long as the base (one compact block, like the real
+  // sight): both span z -0.06..0.09.
+  const hoodL = 0.15;
+  const hoodY = 0.004;
+  const hoodZ = 0.015;
+  const mkBox = (w: number, h: number, l: number, x: number, y: number, z: number): void => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), hoodMat);
+    m.position.set(x, y, z);
+    m.layers.set(1);
+    eotechGroup.add(m);
+  };
+  // left / right shroud walls
+  mkBox(wallT, hoodH, hoodL, -hoodW / 2, hoodY, hoodZ);
+  mkBox(wallT, hoodH, hoodL, hoodW / 2, hoodY, hoodZ);
+  // top brow
+  mkBox(hoodW + wallT, 0.011, hoodL, 0, hoodY + hoodH / 2, hoodZ);
+  // brightness keys on the base rear face, below the glass
+  const btnGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.006, 12);
+  btnGeo.rotateX(Math.PI / 2);
+  for (const bx of [-0.012, 0.012]) {
+    const b = new THREE.Mesh(btnGeo, btnMat);
+    b.position.set(bx, -0.062, 0.091);
+    b.layers.set(1);
+    eotechGroup.add(b);
+  }
+
+  // Holographic film (rear pane): TRUE passthrough — the real world shows
+  // straight through (no render-target image pasted on glass, that read as
+  // "just another scope"). The laser pattern floats on top, collimated: it
+  // hangs in the air while the housing moves around it (uOffset is driven
+  // per-frame from the housing lag + breath float, like the free sniper
+  // etch). Small 65 MOA ring + 1 MOA dot + 4 stadia ticks.
+  eotechFilm = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uColor: { value: new THREE.Color(1.0, 0.16, 0.05) },
+      uBattery: { value: 1.0 },
+      uTime: { value: 0.0 },
+      uOffset: { value: new THREE.Vector2(0, 0) },
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        // Bare holographic film: a whisper of tint so the rear pane reads
+        // as glass. The reticle itself is NOT painted here — it is a
+        // collimated screen-space beam (holoMat) that lives at infinity on
+        // the sight axis, so nothing on this glass can ever outline, darken
+        // or plaster itself to the pane center. Kept negligible straight-on
+        // so the pane never reads as a dimmed patch in the sight picture.
+        gl_FragColor = vec4(vec3(0.45, 0.58, 0.62) * 0.02, 0.02);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  // Compact panes with clearance all around: no glass poking past the
+  // frame lines, no stretched look. Neither pane carries UV-space shading,
+  // so no rim can ever read as an ellipse.
+  eotechGlass = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.05), eotechFilm);
+  eotechGlass.position.set(0, 0.004, EOTECH_GLASS_Z);
+  eotechGlass.layers.set(1);
+  eotechGlass.renderOrder = 3;
+  eotechGroup.add(eotechGlass);
+}
+
 // PERF: 768 instead of 1024 — the lens covers ~65% of screen height at ADS,
 // so 768px across the aperture still supersamples the displayed ~590px while
 // cutting scope-pass fill rate ~44%.
 const scopeTarget = new THREE.WebGLRenderTarget(768, 768, {
   format: THREE.RGBAFormat,
 });
+// Holographic glow probe: 4x4 scene grab from the main camera every 4th
+// frame (EOTECH only). Center luminance drives the beam's reactive glow —
+// the same dark-adaptive response as the scope illumination
+// (glowStrength = 0.55 + dark * 2.2), so aiming into shadow blooms the dot
+// and aiming at sky tightens it. Linear values (RTs skip tone mapping),
+// same weights/thresholds as the lens shader's darkFactor.
+const holoProbe = new THREE.WebGLRenderTarget(4, 4);
+const holoProbeBuf = new Uint8Array(4 * 4 * 4);
+let holoProbeTick = 0;
+let holoDark = 0;
 
 // ---- ADS DOF (gated: zero cost at hip) ----
 // PERF budget: main view → 2xMSAA RT w/ depth → half-res 9-tap H+V →
@@ -725,6 +916,114 @@ const dofScene = new THREE.Scene();
   q.frustumCulled = false;
   dofScene.add(q);
 }
+// ---- COLLIMATED HOLOGRAPHIC BEAM (EOTECH): screen-space, aim-coupled ----
+// A reflex sight collimates its reticle: the pattern lives at infinity on
+// the sight axis. Its screen position is therefore the gun's aim point —
+// computed by projecting eye + sightDir * far — and it is drawn only where
+// that ray actually pierces the glass (projected window quad test). No eye
+// relief heuristics, no glass-UV sticker: hip carry puts the eye far
+// off-axis so the sight line misses the 60 mm window (glass only, no dot),
+// shouldering sweeps the dot in, and its angular size is constant (65 MOA
+// is 65 MOA at any distance). The ring clips at the real glass edge.
+const holoMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthTest: false,
+  depthWrite: false,
+  uniforms: {
+    uDot: { value: new THREE.Vector2(0, 0) },
+    uWin: {
+      value: [new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2()],
+    },
+    uTanHalf: { value: new THREE.Vector2(1, 1) },
+    uPx: { value: 0.001 },
+    uColor: { value: new THREE.Color(1.0, 0.16, 0.05) },
+    uBattery: { value: 1.0 },
+    uTime: { value: 0.0 },
+    uWinOk: { value: 0.0 },
+    uDotOk: { value: 0.0 },
+    uDark: { value: 0.0 },
+  },
+  vertexShader: POST_VERT,
+  fragmentShader: /* glsl */ `
+    uniform vec2 uDot;
+    uniform vec2 uWin[4];
+    uniform vec2 uTanHalf;
+    uniform float uPx;
+    uniform vec3 uColor;
+    uniform float uBattery;
+    uniform float uTime;
+    uniform float uWinOk;
+    uniform float uDotOk;
+    uniform float uDark;
+    varying vec2 vUv;
+    float holoSeg(vec2 p, vec2 a, vec2 b) {
+      vec2 pa = p - a;
+      vec2 ba = b - a;
+      float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+      return length(pa - ba * h);
+    }
+    void main() {
+      // fragment ray in tan-space (exact perspective, aspect-correct)
+      vec2 f = (vUv * 2.0 - 1.0) * uTanHalf;
+      float gate = uWinOk * uDotOk * uBattery;
+      // inside the projected glass quad? (CCW edges, same-side test)
+      vec2 A = uWin[0];
+      vec2 B = uWin[1];
+      vec2 C = uWin[2];
+      vec2 D = uWin[3];
+      float s0 = (B.x - A.x) * (f.y - A.y) - (B.y - A.y) * (f.x - A.x);
+      float s1 = (C.x - B.x) * (f.y - B.y) - (C.y - B.y) * (f.x - B.x);
+      float s2 = (D.x - C.x) * (f.y - C.y) - (D.y - C.y) * (f.x - C.x);
+      float s3 = (A.x - D.x) * (f.y - D.y) - (A.y - D.y) * (f.x - D.x);
+      float inW = (s0 > -1e-7 && s1 > -1e-7 && s2 > -1e-7 && s3 > -1e-7) ? 1.0 : 0.0;
+      // 65 MOA ring + 1 MOA dot + stadia ticks, constant angular size
+      vec2 q = f - uDot;
+      float d = length(q);
+      float aa = fwidth(d) * 1.4 + 1e-7;
+      float R = 0.012;
+      float wR = max(0.0006, uPx * 1.8);
+      float ring = 1.0 - smoothstep(wR - aa, wR + aa, abs(d - R));
+      float k0 = holoSeg(q, vec2(0.0, R), vec2(0.0, R + 0.0035));
+      float k1 = holoSeg(q, vec2(0.0, -R), vec2(0.0, -R - 0.0035));
+      float k2 = holoSeg(q, vec2(R, 0.0), vec2(R + 0.0035, 0.0));
+      float k3 = holoSeg(q, vec2(-R, 0.0), vec2(-R - 0.0035, 0.0));
+      float kd = min(min(k0, k1), min(k2, k3));
+      float tick = 1.0 - smoothstep(wR - aa, wR + aa, kd);
+      float wD = max(0.0002, uPx * 1.5);
+      float dotm = 1.0 - smoothstep(wD - aa, wD + aa, d);
+      float core = 1.0 - smoothstep(wD * 0.45 - aa, wD * 0.45 + aa, d);
+      float flick = 0.98 + 0.02 * sin(uTime * 91.0 + d * 420.0);
+      // Laserish bloom: the LDR overlay has no HDR pre-tonemap stage to
+      // bloom in, so the aura is painted wide and hot instead — broad aura
+      // + tight needle around the dot + ring bleed, all pure scope red.
+      float halo = exp(-d * 45.0) * 0.55 + exp(-abs(d - R) * 120.0) * 0.4 + exp(-d * 450.0) * 0.9;
+      float wash = (exp(-d * 300.0) * 0.30 + 0.0012) * (0.5 + uDark * 0.8);
+      float pat = clamp(ring + tick + dotm + core, 0.0, 1.0);
+      float m = clamp(pat + (halo + wash) * 0.6, 0.0, 1.0);
+      // Same dark-adaptive staging as the scope illumination (blooms aiming
+      // into shadow, tightens against sky); hue stays pure scope red.
+      float glowStrength = (0.55 + uDark * 2.2);
+      vec3 col = (uColor * (pat * 1.2 + halo * 1.1) * glowStrength + uColor * wash) * flick * gate;
+      float a = m * gate * inW;
+      gl_FragColor = vec4(col, a);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }
+  `,
+});
+const holoScene = new THREE.Scene();
+{
+  const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), holoMat);
+  q.frustumCulled = false;
+  holoScene.add(q);
+}
+// Glass corners in eotechGroup space (film 0.06 x 0.05 at EOTECH_GLASS_Z)
+const EO_CORNERS = [
+  new THREE.Vector3(-0.03, -0.021, EOTECH_GLASS_Z),
+  new THREE.Vector3(0.03, -0.021, EOTECH_GLASS_Z),
+  new THREE.Vector3(0.03, 0.029, EOTECH_GLASS_Z),
+  new THREE.Vector3(-0.03, 0.029, EOTECH_GLASS_Z),
+];
 let dofActive = false;
 // Focus distance: throttled center ray (every 6th frame), smoothed.
 const focusRay = new THREE.Raycaster();
@@ -917,6 +1216,26 @@ const lensMat = new THREE.ShaderMaterial({
       float wr = max(0.0014 * fw, fwidth(dr) * 1.5);
       return clamp(dotC + (1.0 - smoothstep(0.0018, 0.0018 + wr, dr)) * rg, 0.0, 1.0);
     }
+    // Illuminated EOTECH: 65 MOA ring + 1 MOA dot + 4 stadia ticks.
+    // q is aspect-corrected at the call site (x * 1.2) so the ring stays
+    // circular on the wide holo pane. Same per-channel CA treatment as above.
+    float illumEotech(vec2 q, float fw) {
+      float dd = length(q);
+      float wd = max(0.002 * fw, fwidth(dd) * 1.5);
+      float dotC = 1.0 - smoothstep(0.016, 0.016 + wd, dd);
+      float core = 1.0 - smoothstep(0.007, 0.007 + wd, dd);
+      float dr = abs(dd - 0.30);
+      float wr = max(0.008 * fw, fwidth(dr) * 1.5);
+      float ring = 1.0 - smoothstep(0.008, 0.008 + wr, dr);
+      float t0 = sdSegment(q, vec2(0.0, 0.29), vec2(0.0, 0.39));
+      float t1 = sdSegment(q, vec2(0.0, -0.29), vec2(0.0, -0.39));
+      float t2 = sdSegment(q, vec2(0.29, 0.0), vec2(0.39, 0.0));
+      float t3 = sdSegment(q, vec2(-0.29, 0.0), vec2(-0.39, 0.0));
+      float td = min(min(t0, t1), min(t2, t3));
+      float wt = max(0.008 * fw, fwidth(td) * 1.5);
+      float tick = 1.0 - smoothstep(0.008, 0.008 + wt, td);
+      return clamp(dotC + core * 0.8 + ring + tick, 0.0, 1.0);
+    }
     // Analytically anti-aliased primitives (fwidth): etch lines stay hairline
     // without shimmering at 1px widths.
     float aaLine(float c, float w) {
@@ -937,6 +1256,10 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 uv = vUv - 0.5;
       float r2 = dot(uv, uv);
       float distFromCenter = length(uv);
+      // Holographic 1x window (EOTECH): same shader as the scopes, minus the
+      // tube. No field stop, no tunnel, no ocular rim — just the 1x image
+      // with the laser-projected reticle and identical illumination response.
+      bool isEo = uOpticMode > 1.5;
 
       float swayDist = length(uEyeOffset);
 
@@ -1051,10 +1374,16 @@ const lensMat = new THREE.ShaderMaterial({
       // the picture stays close to 1:1 while the crescent does the talking.
       float imageScale = mix(1.0, uEyeRelief, 0.4);
       vec2 imgUv = (uv + imageShift) * imageScale;
+      // Holo pane is wider than tall (0.06 x 0.05): sample the central
+      // vertical band so world scale is uniform on both axes (true 1x).
+      if (isEo) imgUv.y /= 1.2;
       float swayBoost = min(swayDist * 2.0, 1.0);
       float zoomBoost = clamp((uZoomK - 1.0) * 0.45, 0.0, 1.0);
       // barrel strength: negative → barrel; stronger off-axis (hip), eased ADS
       float barrelK = mix(-0.26, -0.16, uAdsWeight) * (1.0 + 0.8 * swayBoost + 1.2 * zoomBoost);
+      // A holographic window is a flat pane, not a curved ocular: keep only a
+      // whisper of bend so the etch still sits in glass, never a fishbowl.
+      if (isEo) barrelK *= 0.12;
       vec2 baseUv = barrelWarp(imgUv, barrelK);
       float br = length(baseUv);
 
@@ -1078,8 +1407,8 @@ const lensMat = new THREE.ShaderMaterial({
       // Coated-glass transmission loss + off-axis dimming: ADS center runs
       // ~78% of naked-eye brightness, hip peephole collapses toward 30%.
       // (Deliberately under, not over — the old 0.9 + additive lifts read as
-      // a flashlight inside the tube.)
-      sceneColor *= 0.78 * reliefDim * uGlassTint;
+      // a flashlight inside the tube.) Holo pane transmits ~96%: it is 1x.
+      sceneColor *= (isEo ? 0.96 : 0.78) * reliefDim * uGlassTint;
       sceneColor *= clamp(barrelJac(imgUv, barrelK), 0.55, 1.5);
 
       // ---- LENS SMUDGE & DIRT: baked texture, glint-only ----
@@ -1102,7 +1431,8 @@ const lensMat = new THREE.ShaderMaterial({
       float flare = flareBand * sweep * uSunIntensity * 0.025 * inImage;
       sceneColor += flare * vec3(1.0, 0.99, 0.96);
 
-      // ---- RETICLE: uOpticMode 0 = sniper mil-lines, 1 = ACOG / red dot ----
+      // ---- RETICLE: uOpticMode 0 = sniper mil-lines, 1 = ACOG / red dot,
+      // 2 = EOTECH ring + dot + ticks (same illumination model as the rest) ----
       // NOTE: scope image is intentionally NOT mirrored/inverted. Real rifle
       // scopes erect the image (upright), and our render-target camera looks
       // forward along the barrel, so upright sampling here is correct. At hip
@@ -1128,7 +1458,7 @@ const lensMat = new THREE.ShaderMaterial({
       // Eye-distance size cue: closer eye reads the etch slightly larger.
       vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
       vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
-      bool isAcog = uOpticMode > 0.5;
+      bool isAcog = uOpticMode > 0.5 && uOpticMode < 1.5;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
       // first off-axis — tiny features go before lines, like real glass.
@@ -1148,7 +1478,8 @@ const lensMat = new THREE.ShaderMaterial({
       float aPostX = aaLine(p.x, 0.004 * defK) * aaBand(p.y, 0.14, 0.4);
       float aPostY = aaLine(p.y, 0.004 * defK) * aaBand(p.x, 0.14, 0.4);
       float acogEtch = clamp(aTickX + aTickY + aPostX + aPostY, 0.0, 1.0);
-      float etchedMask = isAcog ? acogEtch : sniperEtch;
+      // Holographic sights have no etched backup: battery off = clean glass.
+      float etchedMask = isEo ? 0.0 : (isAcog ? acogEtch : sniperEtch);
 
       // Focus + glow response: a centered eye focuses the etch crisply; as the
       // eye leaves the box the eye can't accommodate, so edges soften and the
@@ -1170,9 +1501,17 @@ const lensMat = new THREE.ShaderMaterial({
       float dDot = length(pi);
       float dRing = abs(dDot - 0.032);
 
+      // EOTECH geometry: ring + dot + ticks, aspect-corrected so the ring
+      // stays circular on the wide pane (see illumEotech).
+      vec2 eoq = vec2(pi.x * 1.2, pi.y);
+      float dEoDot = length(eoq);
+      float dEoRing = abs(dEoDot - 0.30);
+
       // bloom: tight halo in dark environments (battery bleed)
       // ACOG dot blooms wider than the sniper chevron on purpose.
-      float haloDist = isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev;
+      float haloDist = isEo
+        ? min(dEoDot * 0.5, dEoRing + 0.012)
+        : (isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev);
       float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(pi) * 22.0) * 0.08;
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
@@ -1183,9 +1522,15 @@ const lensMat = new THREE.ShaderMaterial({
       // the lit mask is sampled per channel at three radial scales so the
       // chevron/dot fringes like the world image bending behind it.
       float retCa = dynamicAberration * reticleVis;        // reuse image CA amplitude
-      float coreG = isAcog ? illumAcog(pi, focusW) : illumSniper(pi, apex, footL, footR, focusW);
-      float coreR = isAcog ? illumAcog(pi * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW);
-      float coreB = isAcog ? illumAcog(pi * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW);
+      float coreG = isEo
+        ? illumEotech(eoq, focusW)
+        : (isAcog ? illumAcog(pi, focusW) : illumSniper(pi, apex, footL, footR, focusW));
+      float coreR = isEo
+        ? illumEotech(eoq * (1.0 - retCa), focusW)
+        : (isAcog ? illumAcog(pi * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW));
+      float coreB = isEo
+        ? illumEotech(eoq * (1.0 + retCa), focusW)
+        : (isAcog ? illumAcog(pi * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW));
       vec3 illumCol = vec3(coreR, coreG, coreB) * illumDim;
       sceneColor += uReticleColor * illumCol * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
@@ -1259,7 +1604,8 @@ const lensMat = new THREE.ShaderMaterial({
       float dFar = length(uv - farC);
 
       float maskEdge = min(shadowK, 0.006);
-      float objectiveMask = smoothstep(nearR - maskEdge, nearR, distImg);
+      // Holo window has no tube: the full pane stays image, edge to edge.
+      float objectiveMask = isEo ? 0.0 : smoothstep(nearR - maskEdge, nearR, distImg);
 
       // NOTE: the eye-box shadow (below, applied just before the tunnel mix)
       // is NOT part of objectiveMask. The mask here is only the physical tube
@@ -1436,11 +1782,16 @@ const lensMat = new THREE.ShaderMaterial({
       vec3 tubeDimmed = tubeWall * (1.0 - eyeBoxShadow * uOutlineShade);
       vec3 viewWithTunnel = mix(sceneColor, tubeDimmed, objectiveMask);
 
-      // ocular rim: hairline only — tiny-tiny
-      float ocularShadow = smoothstep(0.488, 0.5, distOcular);
-      float ringBand = 1.0 - smoothstep(0.0, 0.0025 + outerSoft * 0.003, abs(distOcular - 0.483));
+      // ocular rim: hairline only — tiny-tiny (scopes only; the holo frame
+      // is real hood geometry, so no circular rim is drawn over the pane)
+      float ocularShadow = isEo ? 0.0 : smoothstep(0.488, 0.5, distOcular);
+      float ringBand = isEo
+        ? 0.0
+        : 1.0 - smoothstep(0.0, 0.0025 + outerSoft * 0.003, abs(distOcular - 0.483));
       // bevel: hairline chamfer just inside the rim
-      float bevel = 1.0 - smoothstep(0.0, 0.004 + outerSoft * 0.004, abs(distOcular - 0.476));
+      float bevel = isEo
+        ? 0.0
+        : 1.0 - smoothstep(0.0, 0.004 + outerSoft * 0.004, abs(distOcular - 0.476));
       vec2 ocuN = distOcular > 1e-4 ? uv / distOcular : vec2(0.0, 1.0);
       float ringGlint = pow(max(dot(ocuN, sunN) * 0.5 + 0.5, 0.0), 3.0);
       vec3 ringLight = vec3(0.45, 0.45, 0.45) * ringBand * ringGlint * (0.06 + uSunIntensity * 0.40);
@@ -1459,8 +1810,11 @@ const lensMat = new THREE.ShaderMaterial({
       // Sight-picture brightness: dim center (transmission loss, above), real
       // falloff toward the rim. Never lift the image. Guarded: aperture is
       // exactly 0 at hip (no peephole) so the edge can't be 0.
-      float brightT = smoothstep(0.0, max(currentAperture, 1e-4), length(uv - imageCenter));
-      finalColor *= mix(1.0, 0.62, brightT);
+      // Skipped for the holo pane: 1x must match naked-eye brightness evenly.
+      if (!isEo) {
+        float brightT = smoothstep(0.0, max(currentAperture, 1e-4), length(uv - imageCenter));
+        finalColor *= mix(1.0, 0.62, brightT);
+      }
 
       // faint grain for tactical grit (not in the black tunnel)
       float grain = hash21(vUv * 913.0 + fract(uTime) * 7.0) - 0.5;
@@ -1484,6 +1838,10 @@ const aLens = new THREE.Mesh(aLensGeo, lensMat);
 aLens.position.z = 0.168;
 aLens.layers.set(1);
 acogGroup.add(aLens);
+
+// NOTE: the EOTECH film is intentionally NOT the lens shader — the holo
+// window is true passthrough (transparent), so the world behind stays the
+// naked-eye view and the laser pattern floats collimated on top.
 
 // ---- PHYSICAL GLASS LAYERS: ocular surface (eye side) + objective front
 // element (barrel end). The lens shader above is the *sight picture*; these
@@ -1580,6 +1938,28 @@ addGlass(sniperGroup, 0.06, -0.298, false, 1.3);
 // ACOG: compact cups, same treatment
 addGlass(acogGroup, 0.036, 0.17, true, 1.9);
 addGlass(acogGroup, 0.042, -0.166, false, 1.3);
+// EOTECH front pane: clear protective glass ahead of the holographic film.
+// Two panes, like the real sight. This one is REAL physical glass
+// (standard material: true sun specular + env reflection, flat 7% opacity)
+// precisely because the fake fresnel shader paints a circular-in-UV rim
+// that lands as a dark elliptical band on a rectangular pane — that rim was
+// the black ellipse. No UV-space shading here, so none can ever appear.
+{
+  const eFrontMat = new THREE.MeshStandardMaterial({
+    color: 0x9fb4c4,
+    transparent: true,
+    opacity: 0.07,
+    roughness: 0.08,
+    metalness: 0.9,
+    depthWrite: false,
+    envMapIntensity: 1.2,
+  });
+  const eFront = new THREE.Mesh(new THREE.PlaneGeometry(0.058, 0.046), eFrontMat);
+  eFront.position.set(0, 0.004, -0.045);
+  eFront.layers.set(1);
+  eFront.renderOrder = 4;
+  eotechGroup.add(eFront);
+}
 
 interface ScopeConfig {
   fov: number;
@@ -1666,6 +2046,13 @@ applySwayUI();
 
 const hipPosition = new THREE.Vector3(0.22, -0.22, -0.65);
 const adsPosition = new THREE.Vector3(0.0, 0.0, -0.38);
+// EOTECH shoulders close, but not glued to the eyeball: ~0.19 m
+// eye-to-film. Near enough that the window fills the view, far enough that
+// the hood doesn't loom and the counter-yaw stays gentle.
+const adsEotech = new THREE.Vector3(0.0, -0.010, -0.24);
+// Right-eye stance per optic: the holo sits nearer the eye line, so it
+// needs less lateral offset (less "rotated" rifle at ADS).
+const ADS_X_EOTECH = 0.05;
 weaponGroup.position.copy(hipPosition);
 
 // Right-eye ADS (K): the scope sits on the right side of the screen, like a
@@ -1745,7 +2132,8 @@ document.addEventListener('mouseup', (e: MouseEvent) => {
 document.addEventListener('contextmenu', (e: Event) => e.preventDefault());
 
 document.addEventListener('wheel', (e: WheelEvent) => {
-  if (isAiming) {
+  // EOTECH is a fixed 1x holo sight — the wheel does nothing there.
+  if (isAiming && !eotechActive) {
     config.fov += Math.sign(e.deltaY) * 0.5;
     config.fov = THREE.MathUtils.clamp(config.fov, 1.0, 15.0);
     scopeCamera.fov = config.fov;
@@ -1762,11 +2150,19 @@ function isLeanKey(key: string): key is LeanKey {
 
 // Reticle illumination state (C toggles red/green, B toggles battery)
 // Battery is PER OPTIC: the sniper chevron ships unlit (etched-only, classic
-// unpowered mil reticle) while the ACOG red dot ships lit.
+// unpowered mil reticle) while the ACOG red dot and the EOTECH holo ship lit.
 let reticleIsGreen = false;
-const batteryOn: { sniper: number; acog: number } = { sniper: 0, acog: 1 };
+const batteryOn: { sniper: number; acog: number; eotech: number } = { sniper: 0, acog: 1, eotech: 1 };
+function activeBatteryKey(): 'sniper' | 'acog' | 'eotech' {
+  if (eotechActive) return 'eotech';
+  return acogActive ? 'acog' : 'sniper';
+}
 function applyBattery(): void {
-  lensMat.uniforms.uBattery.value = batteryOn[acogActive ? 'acog' : 'sniper'];
+  // Magnified optics share the lens-shader battery; the collimated holo
+  // beam carries its own.
+  lensMat.uniforms.uBattery.value = batteryOn[activeBatteryKey()];
+  eotechFilm.uniforms.uBattery.value = batteryOn.eotech;
+  holoMat.uniforms.uBattery.value = batteryOn.eotech;
 }
 // FFP scaling (sniper reticle grows with zoom) — off by default, F toggles
 let ffpEnabled = false;
@@ -1774,18 +2170,32 @@ const RETICLE_RED = new THREE.Color(1.0, 0.16, 0.05);
 const RETICLE_GREEN = new THREE.Color(0.25, 1.0, 0.35);
 const SNIPER_FOV = 3.0;
 const ACOG_FOV = 9.0;
+// EOTECH is 1x: config.fov follows the naked-eye view so ADS sensitivity
+// stays natural. The holo pane itself is see-through (no RT), so this only
+// drives look sensitivity + sway bookkeeping, never magnification.
+const EOTECH_FOV = 55.0;
 
-function setOpticMode(acog: boolean): void {
-  lensMat.uniforms.uOpticMode.value = acog ? 1.0 : 0.0;
+export type OpticId = 'sniper' | 'acog' | 'eotech';
+function setOpticMode(mode: OpticId | boolean): void {
+  const id: OpticId = mode === true ? 'acog' : mode === false ? 'sniper' : mode;
+  const isAcog = id === 'acog';
+  const isEo = id === 'eotech';
+  lensMat.uniforms.uOpticMode.value = isEo ? 2.0 : isAcog ? 1.0 : 0.0;
   // Swap whole rifle models, not just reticles
-  sniperGroup.visible = !acog;
-  acogGroup.visible = acog;
-  acogActive = acog;
+  sniperGroup.visible = !isAcog && !isEo;
+  acogGroup.visible = isAcog;
+  eotechGroup.visible = isEo;
+  acogActive = isAcog;
+  eotechActive = isEo;
   applyBattery();
-  config.fov = acog ? ACOG_FOV : SNIPER_FOV;
+  config.fov = isEo ? EOTECH_FOV : isAcog ? ACOG_FOV : SNIPER_FOV;
   scopeCamera.fov = config.fov;
   // Objective station differs per housing (sniper bell vs ACOG cup)
-  scopeCamera.position.z = acog ? -0.14 : -(tubeLength / 2);
+  // Render-camera station per housing: sniper bell, ACOG cup, EOTECH window.
+  // The holo RT runs at 1x (EOTECH_FOV) from the window plane, feeding the
+  // same lens shader the scopes use — that is what makes the reticle behave
+  // exactly like the scope crosshairs.
+  scopeCamera.position.z = isEo ? EOTECH_GLASS_Z : isAcog ? -0.14 : -(tubeLength / 2);
   scopeCamera.updateProjectionMatrix();
   // Fresh shoulder weld for the swapped optic: the eye geometry of the two
   // rifles differs, so a leftover eye-box crescent / swing-speed state from
@@ -1800,8 +2210,10 @@ function setOpticMode(acog: boolean): void {
   bodyRX = 0;
   sniperGroup.position.set(0, 0, 0);
   acogGroup.position.set(0, 0, 0);
+  eotechGroup.position.set(0, 0, 0);
   sniperGroup.rotation.set(0, 0, 0);
   acogGroup.rotation.set(0, 0, 0);
+  eotechGroup.rotation.set(0, 0, 0);
   lensMat.uniforms.uEyeOffset.value.set(0, 0);
   lensMat.uniforms.uEyeRelief.value = 1.0;
   lensMat.uniforms.uSwaySpeed.value = 0.0;
@@ -1817,16 +2229,24 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
   const k = e.key.toLowerCase();
   if (isMoveKey(k)) keys[k] = true;
   if (isLeanKey(k)) leanKeys[k] = true;
-  if (k === '1') setOpticMode(false);
-  if (k === '2') setOpticMode(true);
+  if (k === '1') setOpticMode('sniper');
+  if (k === '2') setOpticMode('acog');
+  if (k === '3') setOpticMode('eotech');
   if (k === 'c') {
+    // Reticle color follows everywhere: scope illumination + holo beam.
     reticleIsGreen = !reticleIsGreen;
     (lensMat.uniforms.uReticleColor.value as THREE.Color).copy(
       reticleIsGreen ? RETICLE_GREEN : RETICLE_RED,
     );
+    (eotechFilm.uniforms.uColor.value as THREE.Color).copy(
+      reticleIsGreen ? RETICLE_GREEN : RETICLE_RED,
+    );
+    (holoMat.uniforms.uColor.value as THREE.Color).copy(
+      reticleIsGreen ? RETICLE_GREEN : RETICLE_RED,
+    );
   }
   if (k === 'b') {
-    const key = acogActive ? 'acog' : 'sniper';
+    const key = activeBatteryKey();
     batteryOn[key] = batteryOn[key] > 0.5 ? 0 : 1;
     applyBattery();
   }
@@ -1902,7 +2322,7 @@ const ammoEl = document.getElementById('ammo') as HTMLParagraphElement;
 
 function updateAmmoUI(): void {
   const mode =
-    acogActive && curAmmo() > 0 ? (fireAuto ? 'AUTO' : 'SEMI') : null;
+    (acogActive || eotechActive) && curAmmo() > 0 ? (fireAuto ? 'AUTO' : 'SEMI') : null;
   ammoEl.textContent =
     reloadT > 0
       ? 'RELOADING…'
@@ -1922,7 +2342,7 @@ function tryFire(): void {
     startReload();
     return;
   }
-  const auto = acogActive && fireAuto;
+  const auto = (acogActive || eotechActive) && fireAuto;
   setCurAmmo(curAmmo() - 1);
   fireCd = auto ? FIRE_GAP_AUTO : FIRE_GAP_SINGLE;
   flashT = 0.06;
@@ -1939,8 +2359,8 @@ function tryFire(): void {
   pitchTarget = Math.min(pitchTarget + 0.014, Math.PI / 2);
   yawTarget += (Math.random() - 0.5) * 0.006;
   camera.fov = Math.min(camera.fov + 2.5, 75);
-  // flash at the brake tip
-  _mzl.set(0, BORE_Y, -1.45);
+  // flash at the brake tip (per rifle: carbines end at ~-1.05)
+  _mzl.set(0, BORE_Y, acogActive || eotechActive ? -1.1 : -1.45);
   weaponGroup.localToWorld(_mzl);
   flashSprite.position.copy(_mzl);
   flashSprite.scale.setScalar(0.28 + Math.random() * 0.16);
@@ -2020,13 +2440,16 @@ const TAU = Math.PI * 2;
 // (no extra light → no forward-shader recompile, no per-frame light cost).
 const MAG_SNIPER = 5;
 const MAG_ACOG = 30;
+const MAG_EOTECH = 30;
 const FIRE_GAP_SINGLE = 0.9;
 const FIRE_GAP_AUTO = 0.12;
 const RELOAD_TIME = 1.4;
-// Per-optic ammo pools; sniper is single-fire only, ACOG toggles SEMI/AUTO (V).
+// Per-optic ammo pools; sniper is single-fire only, ACOG/EOTECH toggle SEMI/AUTO (V).
 let sniperAmmo = MAG_SNIPER;
 let acogAmmo = MAG_ACOG;
+let eotechAmmo = MAG_EOTECH;
 let acogActive = false;
+let eotechActive = false;
 let fireAuto = false;
 let triggerHeld = false;
 let reloadT = 0;
@@ -2038,13 +2461,16 @@ let dofRings = true;
 const dofMapEnabled = false;
 
 function curMag(): number {
+  if (eotechActive) return MAG_EOTECH;
   return acogActive ? MAG_ACOG : MAG_SNIPER;
 }
 function curAmmo(): number {
+  if (eotechActive) return eotechAmmo;
   return acogActive ? acogAmmo : sniperAmmo;
 }
 function setCurAmmo(v: number): void {
-  if (acogActive) acogAmmo = v;
+  if (eotechActive) eotechAmmo = v;
+  else if (acogActive) acogAmmo = v;
   else sniperAmmo = v;
 }
 // WHOLE-WEAPON PHYSICS: position/rotation + velocities. Anchors switch on
@@ -2055,7 +2481,6 @@ const wVel = new THREE.Vector3();
 const wRot = new THREE.Vector3(0, 0.15, 0.05);
 const wRotVel = new THREE.Vector3();
 const _anchor = new THREE.Vector3();
-const HIP_ADS_DIST = hipPosition.distanceTo(adsPosition);
 // per-frame mouse impulse (px) — drives acceleration kicks, then zeroed.
 let moveImpX = 0;
 let moveImpY = 0;
@@ -2076,6 +2501,14 @@ let moveBlend = 0;
 // Exposed for gameplay: true point-of-impact error caused by parallax.
 // Bullet logic should add this (in lens UV units) scaled to world.
 export const parallaxError = new THREE.Vector2(0, 0);
+// Holographic projection scratch (module-scope, zero per-frame allocs)
+const _hCamInv = new THREE.Matrix4();
+const _hQ = new THREE.Quaternion();
+const _hEoQ = new THREE.Quaternion();
+const _hDir = new THREE.Vector3();
+const _hV = new THREE.Vector3();
+const _hC = new THREE.Vector3();
+const _hN = new THREE.Vector3();
 
 function animate(): void {
   requestAnimationFrame(animate);
@@ -2110,7 +2543,10 @@ function animate(): void {
     // K-toggle: ADS anchor slides right for the right-eye stance. Hip never
     // moves — this only affects the shouldered position.
     adsPosition.x = rightEye ? ADS_X_RIGHT : 0.0;
-    _anchor.lerpVectors(hipPosition, adsPosition, targetWeight);
+    adsEotech.x = rightEye ? ADS_X_EOTECH : 0.0;
+    // EOTECH shoulders to its own close anchor (holo window, no eye relief).
+    const adsAnchor = eotechActive ? adsEotech : adsPosition;
+    _anchor.lerpVectors(hipPosition, adsAnchor, targetWeight);
     // X sway mode gate: modes 1/2/3/4/5 (all but FREE) multiply the whole
     // free-float / physical-sway layer by 0 so the rifle behaves rigidly.
     // Only base rotations (hip→ADS easing), recoil impulses and manual Q/E
@@ -2210,11 +2646,14 @@ function animate(): void {
     // suppression below; stillZoom (and the damp above) shape how zoom scales
     // the free-float wobble. swayAct ≈ 0 when the rifle sits still, ~1 when it
     // is actually being swung/flicked.
-    const zoomTw = THREE.MathUtils.clamp(
-      Math.pow((acogActive ? ACOG_FOV : SNIPER_FOV) / config.fov, 2.0),
-      0.25,
-      6.0,
-    );
+    // EOTECH is 1x: no zoom tightening, no eye-box amplification.
+    const zoomTw = eotechActive
+      ? 1.0
+      : THREE.MathUtils.clamp(
+          Math.pow((acogActive ? ACOG_FOV : SNIPER_FOV) / config.fov, 2.0),
+          0.25,
+          6.0,
+        );
     const swayAct = THREE.MathUtils.clamp(
       Math.hypot(mouseVelocityX, mouseVelocityY) * 40.0 +
         moveBlend * 0.6 +
@@ -2231,10 +2670,11 @@ function animate(): void {
       0.15,
       currentAdsWeight * stillZoom,
     );
-    // Heavy sniper breathes slow and deep; the light carbine is snappier but
-    // trembles more.
-    const lowK = acogActive ? 0.8 : 1.15;
-    const tremorK = acogActive ? 1.25 : 0.7;
+    // Heavy sniper breathes slow and deep; the light carbines (ACOG/EOTECH)
+    // are snappier but tremble more.
+    const isCarbine = acogActive || eotechActive;
+    const lowK = isCarbine ? 0.8 : 1.15;
+    const tremorK = isCarbine ? 1.25 : 0.7;
     // Exertion (mouse flicks / running) is a HIP sway driver — while aiming it
     // would make every small correction pump the wobble up for seconds, so its
     // contribution is damped to ~30% at the shoulder.
@@ -2257,7 +2697,7 @@ function animate(): void {
       wanderTX = (Math.random() * 2 - 1) * wA;
       wanderTY = (Math.random() * 2 - 1) * wA * 0.7;
     }
-    const cruiseK = Math.min(1, (acogActive ? 3.0 : 2.2) * delta);
+    const cruiseK = Math.min(1, (isCarbine ? 3.0 : 2.2) * delta);
     wanderCX += (wanderTX - wanderCX) * cruiseK;
     wanderCY += (wanderTY - wanderCY) * cruiseK;
     // Breathing: ~13/min fundamental + 2nd harmonic (exhale longer than
@@ -2368,7 +2808,8 @@ function animate(): void {
     // and the scopeCamera (a tube child) shows the world region the scope
     // actually covers — no content mismatch, just a slight foreshortening
     // tilt from the ~7.5° viewing angle, like a real offset optic.
-    const yawAds = rightEye ? -Math.atan2(adsPosition.x, -adsPosition.z) : 0.0;
+    // Counter-yaw tracks the ACTIVE anchor (EOTECH sits closer → steeper angle).
+    const yawAds = rightEye ? -Math.atan2(adsAnchor.x, -adsAnchor.z) : 0.0;
     const baseRotY = THREE.MathUtils.lerp(0.15, yawAds, targetWeight);
     const baseRotZ = THREE.MathUtils.lerp(0.05, 0.0, targetWeight);
     {
@@ -2400,8 +2841,11 @@ function animate(): void {
       wPos.y += wVel.y * delta;
       wPos.z += wVel.z * delta;
       weaponGroup.position.copy(wPos);
-      const dAds = wPos.distanceTo(adsPosition);
-      const aw = THREE.MathUtils.clamp(1 - dAds / HIP_ADS_DIST, 0, 1);
+      // Per-optic shoulder distance: the EOTECH anchor sits much closer, so
+      // its hip→ADS travel is shorter — normalize against the active optic.
+      const hipDist = hipPosition.distanceTo(adsAnchor);
+      const dAds = wPos.distanceTo(adsAnchor);
+      const aw = THREE.MathUtils.clamp(1 - dAds / hipDist, 0, 1);
       currentAdsWeight = aw * aw * (3 - 2 * aw);
     }
     lensMat.uniforms.uAdsWeight.value = currentAdsWeight;
@@ -2427,7 +2871,9 @@ function animate(): void {
       camera.getWorldPosition(_eyeWorld);
       _eyeLocal.copy(_eyeWorld);
       weaponGroup.worldToLocal(_eyeLocal);
-      const isAcog = (lensMat.uniforms.uOpticMode.value as number) > 0.5;
+      const opticModeV = lensMat.uniforms.uOpticMode.value as number;
+      const isAcog = opticModeV > 0.5 && opticModeV < 1.5;
+      const isEo = opticModeV > 1.5;
       const tubeR = isAcog ? 0.0355 : tubeRadius;
       const ocularZ = isAcog ? 0.14 : 0.235;
       const optRelief = isAcog ? 0.24 : 0.145; // ADS eye-to-ocular distance
@@ -2439,12 +2885,11 @@ function animate(): void {
       // reads ~1x gain, fully zoomed runs ~6x. Quadratic falloff so the
       // forgiving end drops off fast while the top end bites hard — this is
       // the "harder eye relief when zoomed" feel the shader eats up.
+      // EOTECH is a 1x holo sight: no eye box at all (unmagnified window).
       const baseFov = isAcog ? ACOG_FOV : SNIPER_FOV;
-      const zoomTighten = THREE.MathUtils.clamp(
-        Math.pow(baseFov / config.fov, 2.0),
-        0.25,
-        6.0,
-      );
+      const zoomTighten = isEo
+        ? 1.0
+        : THREE.MathUtils.clamp(Math.pow(baseFov / config.fov, 2.0), 0.25, 6.0);
       const relief = THREE.MathUtils.clamp(
         1 + (reliefDist / optRelief - 1) * zoomTighten,
         0.35,
@@ -2495,8 +2940,14 @@ function animate(): void {
         (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
       const softY =
         (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
-      const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
-      const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
+      let eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
+      let eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
+      // Holographic sight: the window has no exit pupil — the eye can sit
+      // anywhere and the reticle stays put. Kill the crescent at the source.
+      if (isEo) {
+        eyeU = 0;
+        eyeV = 0;
+      }
       // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
       // amplified, so the only knob needed is how much of that error "counts".
       // When the rifle is sitting still we suppress it (harder as you zoom),
@@ -2510,11 +2961,10 @@ function animate(): void {
       const zoomGain = THREE.MathUtils.lerp(restGain, 1.0, swayAct);
       const eyeUEff = eyeU * zoomGain;
       const eyeVEff = eyeV * zoomGain;
-      const reliefEff = THREE.MathUtils.clamp(
-        1.0 + (relief - 1.0) * zoomGain,
-        0.35,
-        3.0,
-      );
+      // EOTECH: relief is always perfect — no defocus, no aperture shrink.
+      const reliefEff = isEo
+        ? 1.0
+        : THREE.MathUtils.clamp(1.0 + (relief - 1.0) * zoomGain, 0.35, 3.0);
       // Operator re-seat, asymmetric: the eye LOSES the box fast (attack)
       // and re-finds it slowly (release). Fast L-R flicks punch shadow in
       // on every reversal instead of averaging out to nothing.
@@ -2610,12 +3060,21 @@ function animate(): void {
         // Flick right -> housing kicks right, flick up -> housing kicks up.
         // Tight travel (±0.03, inside the 0.052 tube radius): the eye stays
         // in glass, the box breathes instead of blacking out.
+        // Holographic exception: the beam is collimated (nailed to the bore),
+        // so a translating housing drags the window off a truthful dot and
+        // reads as lag — a real shouldered gun can't shift 30 mm without
+        // rotating aim. Keep holo travel tight (±9 mm); rotations still read.
+        const travelK = eotechActive ? 0.3 : 1.0;
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 0.3, -0.03, 0.03) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
+          (THREE.MathUtils.clamp(mouseVelocityX * 0.3, -0.03, 0.03) +
+            Math.sin(time * 0.9 + seedB) * 0.0015) *
+          gate *
+          travelK;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.24, -0.03, 0.03) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.0015 * gate;
+          (THREE.MathUtils.clamp(-mouseVelocityY * 0.24, -0.03, 0.03) +
+            Math.cos(time * 0.7 + seedC) * 0.0015) *
+          gate *
+          travelK;
         const curM = Math.hypot(bodyLX, bodyLY);
         const tgtM = Math.hypot(tgtX, tgtY);
         const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
@@ -2624,9 +3083,10 @@ function animate(): void {
         // Pitch whisper (up/down only): tilts ahead with the look —
         // flick up tips the housing up, then levels out on stop.
         // Generous range (±0.09 rad, ~5°) so the nod reads clearly. No yaw,
-        // no roll — those read as broken scope.
+        // no roll — those read as broken scope. Holo nods less, same reason
+        // as above: the window must not outrun its collimated dot.
         const tgtRX =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.9, -0.09, 0.09) * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.9, -0.09, 0.09) * gate * travelK;
         const rateR = Math.min(
           1,
           (Math.abs(tgtRX) > Math.abs(bodyRX) ? 18 : 2.8) * delta,
@@ -2636,8 +3096,10 @@ function animate(): void {
         // housing eases back through this same filter instead of popping.
         sniperGroup.position.set(bodyLX, bodyLY, 0);
         acogGroup.position.set(bodyLX, bodyLY, 0);
+        eotechGroup.position.set(bodyLX, bodyLY, 0);
         sniperGroup.rotation.set(bodyRX, 0, 0);
         acogGroup.rotation.set(bodyRX, 0, 0);
+        eotechGroup.rotation.set(bodyRX, 0, 0);
       }
 
       // Reticle roll = weapon-relative roll in FREE only. All locked modes
@@ -2647,11 +3109,12 @@ function animate(): void {
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
-    // FFP sniper reticle follows magnification, ACOG stays fixed (SFP).
+    // FFP sniper reticle follows magnification, ACOG/EOTECH stay fixed (SFP).
     // FFP is opt-in via F (off by default); ACOG ignores it entirely.
-    const isAcogNow = (lensMat.uniforms.uOpticMode.value as number) > 0.5;
+    const opticModeNow = lensMat.uniforms.uOpticMode.value as number;
+    const isSniperNow = opticModeNow < 0.5;
     lensMat.uniforms.uReticleScale.value =
-      !isAcogNow && ffpEnabled
+      isSniperNow && ffpEnabled
         ? THREE.MathUtils.clamp(SNIPER_FOV / config.fov, 0.35, 2.2)
         : 1.0;
 
@@ -2692,23 +3155,28 @@ function animate(): void {
     // ---- TRUE PARALLAX ERROR for gameplay ----
     // Matches shader: sight clamped to 0.8*vignette, reticle = sight*sens.
     // Exported error = reticle minus image = sight*(sens-1): a whisper.
+    // Holographic sights are parallax-free at range: exactly zero.
     {
-      const eye = lensMat.uniforms.uEyeOffset.value as THREE.Vector2;
-      const sens = lensMat.uniforms.uParallaxSens.value as number;
-      const maxS = 0.485 * 0.8;
-      let sx = -eye.x * 2.0;
-      let sy = -eye.y * 2.0;
-      const m = Math.hypot(sx, sy);
-      if (m > maxS) {
-        sx *= maxS / m;
-        sy *= maxS / m;
+      if (eotechActive) {
+        parallaxError.set(0, 0);
+      } else {
+        const eye = lensMat.uniforms.uEyeOffset.value as THREE.Vector2;
+        const sens = lensMat.uniforms.uParallaxSens.value as number;
+        const maxS = 0.485 * 0.8;
+        let sx = -eye.x * 2.0;
+        let sy = -eye.y * 2.0;
+        const m = Math.hypot(sx, sy);
+        if (m > maxS) {
+          sx *= maxS / m;
+          sy *= maxS / m;
+        }
+        parallaxError.set(sx * (sens - 1.0), sy * (sens - 1.0));
       }
-      parallaxError.set(sx * (sens - 1.0), sy * (sens - 1.0));
     }
 
     fireCd = Math.max(0, fireCd - delta);
     // held trigger in AUTO sprays at FIRE_GAP_AUTO through the same path
-    if (triggerHeld && acogActive && fireAuto) tryFire();
+    if (triggerHeld && (acogActive || eotechActive) && fireAuto) tryFire();
     if (reloadT > 0) {
       reloadT -= delta;
       const p = 1 - Math.max(reloadT, 0) / RELOAD_TIME;
@@ -2780,9 +3248,87 @@ function animate(): void {
     }
     dofMat.uniforms.uFocus.value = focusSm;
 
-    renderer.setRenderTarget(scopeTarget);
-    renderer.shadowMap.needsUpdate = true;
-    renderer.render(scene, scopeCamera);
+    // ---- HOLOGRAPHIC PROJECTION: collimated, aim-coupled ----
+    // The reflex reticle lives at infinity on the sight axis: project
+    // eye + sightDir * far into camera tan-space for the dot, and project
+    // the four glass corners for the window silhouette the beam may show
+    // through. Hip carry puts the eye far off-axis (sight line misses the
+    // 60 mm window → glass only, no dot); shouldering sweeps it in; sway,
+    // recoil, lean and head motion move it exactly like the real thing.
+    if (eotechActive) {
+      camera.updateMatrixWorld();
+      _hCamInv.copy(camera.matrixWorld).invert();
+      // sight axis in world — rides weapon sway + recoil, so the dot dances
+      weaponGroup.getWorldQuaternion(_hQ);
+      _hDir.set(0, 0, -1).applyQuaternion(_hQ);
+      _hV.copy(_camWorld).addScaledVector(_hDir, 300).applyMatrix4(_hCamInv);
+      if (_hV.z < -0.01) {
+        holoMat.uniforms.uDotOk.value = 1;
+        (holoMat.uniforms.uDot.value as THREE.Vector2).set(-_hV.x / _hV.z, -_hV.y / _hV.z);
+      } else {
+        holoMat.uniforms.uDotOk.value = 0;
+      }
+      // glass quad → camera tan-space; the eye must be on the viewing side.
+      // Refresh matrices first: BODY housing offsets land after the frame's
+      // main update, so the corners would otherwise lag one frame behind.
+      eotechGroup.updateWorldMatrix(true, false);
+      eotechGroup.getWorldQuaternion(_hEoQ);
+      _hN.set(0, 0, 1).applyQuaternion(_hEoQ);
+      _hC.set(0, 0.004, EOTECH_GLASS_Z).applyMatrix4(eotechGroup.matrixWorld);
+      _hDir.copy(_camWorld).sub(_hC);
+      let winOk = _hN.dot(_hDir) > 0 ? 1 : 0;
+      const winArr = holoMat.uniforms.uWin.value as THREE.Vector2[];
+      for (let wi = 0; wi < 4; wi++) {
+        _hV.copy(EO_CORNERS[wi]).applyMatrix4(eotechGroup.matrixWorld).applyMatrix4(_hCamInv);
+        if (_hV.z > -0.05) winOk = 0;
+        else winArr[wi].set(-_hV.x / _hV.z, -_hV.y / _hV.z);
+      }
+      holoMat.uniforms.uWinOk.value = winOk;
+      const holoFov = THREE.MathUtils.degToRad(camera.fov);
+      const holoTanH = Math.tan(holoFov * 0.5);
+      (holoMat.uniforms.uTanHalf.value as THREE.Vector2).set(holoTanH * camera.aspect, holoTanH);
+      renderer.getDrawingBufferSize(_dofSize);
+      holoMat.uniforms.uPx.value = (2 * holoTanH) / Math.max(_dofSize.y, 1);
+      holoMat.uniforms.uTime.value = time;
+    } else {
+      holoMat.uniforms.uWinOk.value = 0;
+    }
+
+    // Reactive glow probe (EOTECH only, every 4th frame): a 4x4 scene grab
+    // whose center luminance feeds the beam's dark-adaptive glow. Runs first
+    // so it also carries the frame's single shadow-map refresh.
+    let shadowRefreshed = false;
+    if (eotechActive) {
+      holoProbeTick++;
+      if (holoProbeTick % 4 === 0) {
+        renderer.setRenderTarget(holoProbe);
+        renderer.shadowMap.needsUpdate = true;
+        renderer.render(scene, camera);
+        renderer.readRenderTargetPixels(holoProbe, 0, 0, 4, 4, holoProbeBuf);
+        let lum = 0;
+        const pxIdx = [5, 6, 9, 10];
+        for (let li = 0; li < 4; li++) {
+          const o = pxIdx[li] * 4;
+          lum += (holoProbeBuf[o] * 0.299 + holoProbeBuf[o + 1] * 0.587 + holoProbeBuf[o + 2] * 0.114) / 255;
+        }
+        lum *= 0.25;
+        const darkT = 1 - THREE.MathUtils.smoothstep(lum, 0.04, 0.42);
+        holoDark += (darkT - holoDark) * (darkT > holoDark ? 0.5 : 0.12);
+        holoMat.uniforms.uDark.value = holoDark;
+        shadowRefreshed = true;
+      }
+    }
+
+    // The holo window is true passthrough (transparent film, naked-eye
+    // world behind it), so it needs no scope feed — skip a full scene
+    // render every frame while the EOTECH is up.
+    if (!eotechActive) {
+      renderer.setRenderTarget(scopeTarget);
+      renderer.shadowMap.needsUpdate = true;
+      renderer.render(scene, scopeCamera);
+    } else if (!shadowRefreshed) {
+      renderer.shadowMap.needsUpdate = true;
+    }
 
     // Map-view DOF pipeline: PARKED (dofMapEnabled false) — outer-ring glass
     // DOF carries the effect for now. Hysteresis on the switch so the
@@ -2808,6 +3354,13 @@ function animate(): void {
     } else {
       renderer.setRenderTarget(null);
       renderer.render(scene, camera);
+    }
+    // Collimated beam on top: reticle only (background alpha 0), composited
+    // without clearing so the passthrough world stays untouched underneath.
+    if (eotechActive) {
+      renderer.autoClear = false;
+      renderer.render(holoScene, postCam);
+      renderer.autoClear = true;
     }
   }
 }
