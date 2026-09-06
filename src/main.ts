@@ -2210,9 +2210,12 @@ function animate(): void {
     // suppression below; stillZoom (and the damp above) shape how zoom scales
     // the free-float wobble. swayAct ≈ 0 when the rifle sits still, ~1 when it
     // is actually being swung/flicked.
+    // ZOOM LINK: squared mag, floor near-zero so fully zoomed-out stays put.
+    // min 0.04 (not 0.25): at sniper min-zoom mag=0.2 -> 0.04x drive, the
+    // cross stays in place and the crescent barely forms. Base mag -> 1x.
     const zoomTw = THREE.MathUtils.clamp(
       Math.pow((acogActive ? ACOG_FOV : SNIPER_FOV) / config.fov, 2.0),
-      0.25,
+      0.04,
       6.0,
     );
     const swayAct = THREE.MathUtils.clamp(
@@ -2440,11 +2443,25 @@ function animate(): void {
       // forgiving end drops off fast while the top end bites hard — this is
       // the "harder eye relief when zoomed" feel the shader eats up.
       const baseFov = isAcog ? ACOG_FOV : SNIPER_FOV;
+      // ZOOM LINK (same floor as zoomTw): zoomed-out -> error collapses toward
+      // zero (cross stays, crescent fades); zoomed-in -> error amplifies.
       const zoomTighten = THREE.MathUtils.clamp(
         Math.pow(baseFov / config.fov, 2.0),
-        0.25,
+        0.04,
         6.0,
       );
+      // FREEAIM/BODY zoom link: 0 at lowest mag, full at highest. Tied to
+      // wheel position (fov 15 -> 0, fov 1 -> 1, quadratic so the low end
+      // stays near-zero longer), NOT to base-mag — fully zoomed-out never
+      // moves, no matter the optic. Kept separate from the optical
+      // zoomTighten above (which drives the crescent/relief).
+      const zoom01 = THREE.MathUtils.clamp((15 - config.fov) / 14, 0, 1);
+      const freeZoom = zoom01 * zoom01;
+      // CRESCENT zoom link: 0 at lowest mag (fov 15 -> eyeMax 0, no crescent
+      // even on hard mouse flicks), growing proportionally to full bite at
+      // highest mag. Same wheel factor as freeaim/body so cross + crescent
+      // scale together.
+      const eyeMax = 0.375 * freeZoom;
       const relief = THREE.MathUtils.clamp(
         1 + (reliefDist / optRelief - 1) * zoomTighten,
         0.35,
@@ -2495,8 +2512,10 @@ function animate(): void {
         (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
       const softY =
         (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
-      const eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
-      const eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
+      // eyeMax: zoomed-out caps the eye error tiny (less crescent even on
+      // hard flicks); zoomed-in lets it run past base for a bigger bite.
+      const eyeU = THREE.MathUtils.clamp(softX * 0.8, -eyeMax, eyeMax);
+      const eyeV = THREE.MathUtils.clamp(softY * 0.8, -eyeMax, eyeMax);
       // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
       // amplified, so the only knob needed is how much of that error "counts".
       // When the rifle is sitting still we suppress it (harder as you zoom),
@@ -2569,18 +2588,19 @@ function animate(): void {
       // (gun leads the eye), release eases it back to centre = catch-up.
       // No roll, no picture swing — imageShift stays 0, only reticleCenter
       // moves. Gated by ADS + breath hold so a steady hold re-centres.
-      // Wide travel: the cross can roam ~40% of the glass radius before the
-      // clamp catches it — same order as the phantom crescent bite.
+      // ZOOM-LINKED (freeZoom): 0 at lowest mag (fov 15, no movement at all),
+      // full only at highest mag (fov 1). Tamed gains so BODY+FREE combo
+      // doesn't slam the glass — max ~0.14 UV even fully zoomed.
       {
-        const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend);
+        const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
         // Flick right -> cross kicks right, flick up -> cross kicks up:
         // the etch moves AHEAD of the look direction, not behind it.
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 2.2, -0.2, 0.2) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.006 * gate;
+          THREE.MathUtils.clamp(mouseVelocityX * 1.4, -0.14, 0.14) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.004 * gate;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 1.8, -0.2, 0.2) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.006 * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 1.15, -0.14, 0.14) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.004 * gate;
         const curMX = Math.hypot(freeOX, freeOY);
         const tgtMX = Math.hypot(tgtX, tgtY);
         // Fast attack (follows the flick), slow release (catch-up after stop).
@@ -2603,30 +2623,27 @@ function animate(): void {
       // ahead of the look as one unit and ease back. That off-axis housing IS
       // the decentering: the cross reads ahead because the whole scope sits
       // ahead of the look direction.
-      // Same asymmetric catch-up as FREEAIM, in meters (wide travel can
-      // push past the rim on hard flicks).
+      // ZOOM-LINKED like FREEAIM (freeZoom): 0 at lowest mag, tamed travel so
+      // the combo stays inside the glass even fully zoomed.
       {
-        const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend);
+        const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
         // Flick right -> housing kicks right, flick up -> housing kicks up.
-        // Tight travel (±0.03, inside the 0.052 tube radius): the eye stays
-        // in glass, the box breathes instead of blacking out.
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 0.3, -0.03, 0.03) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
+          THREE.MathUtils.clamp(mouseVelocityX * 0.18, -0.022, 0.022) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.001 * gate;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.24, -0.03, 0.03) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.0015 * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.15, -0.022, 0.022) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.001 * gate;
         const curM = Math.hypot(bodyLX, bodyLY);
         const tgtM = Math.hypot(tgtX, tgtY);
         const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
         bodyLX += (tgtX - bodyLX) * rate;
         bodyLY += (tgtY - bodyLY) * rate;
         // Pitch whisper (up/down only): tilts ahead with the look —
-        // flick up tips the housing up, then levels out on stop.
-        // Generous range (±0.09 rad, ~5°) so the nod reads clearly. No yaw,
+        // flick up tips the housing up, then levels out on stop. No yaw,
         // no roll — those read as broken scope.
         const tgtRX =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.9, -0.09, 0.09) * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.5, -0.06, 0.06) * gate;
         const rateR = Math.min(
           1,
           (Math.abs(tgtRX) > Math.abs(bodyRX) ? 18 : 2.8) * delta,
