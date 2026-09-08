@@ -1660,6 +1660,13 @@ let freeOY = 0;
 let bodyLX = 0;
 let bodyLY = 0;
 let bodyRX = 0;
+// ZOOM-SHRINK memory: last frame's zoom factors. A wheel-out must pull the
+// slow-eased lead/crescent states (freeOX/body/_eyeSm/_reliefSm) down
+// proportionally at once — otherwise the stale zoomed-in lead hangs around
+// over the ~1s catch-up release and the crescent stays big after zooming
+// out. Updated at the end of each frame next to the crescent feed.
+let prevFreeZoom = 1;
+let prevZoomTighten = 1;
 const SWAY_UI = {
   el: document.getElementById('swaystate') as HTMLParagraphElement,
 };
@@ -2507,6 +2514,22 @@ function animate(): void {
       // highest mag. Same wheel factor as freeaim/body so cross + crescent
       // scale together.
       const eyeMax = 0.375 * freeZoom;
+      // ZOOM-OUT SHRINK RATIOS: <1 only while wheeling OUT (clamped to 1
+      // otherwise, so zooming IN never touches stored states — the fast
+      // attack builds the bigger lead up naturally). The eased states below
+      // are glass-space expressions of the lead: when zoom collapses, their
+      // old zoomed-in magnitude is stale, so scale them by the same ratio.
+      // Sway-stop decay still rides the slow releases (this only bites when
+      // the wheel actually moved), and mode exits still ease out with no
+      // snap (this keys on zoom, not on the mode/ADS gate).
+      const zoomShrink =
+        prevFreeZoom > 1e-4
+          ? THREE.MathUtils.clamp(freeZoom / prevFreeZoom, 0, 1)
+          : 1;
+      const relShrink =
+        prevZoomTighten > 1e-4
+          ? THREE.MathUtils.clamp(zoomTighten / prevZoomTighten, 0, 1)
+          : 1;
       const relief = THREE.MathUtils.clamp(
         1 + (reliefDist / optRelief - 1) * zoomTighten,
         0.35,
@@ -2638,6 +2661,18 @@ function animate(): void {
         _eyeSm.x += (tgtX - _eyeSm.x) * eyeRate;
         _eyeSm.y += (tgtY - _eyeSm.y) * eyeRate;
         _reliefSm += (reliefEff - _reliefSm) * relRate;
+        // Wheel-out melts the stored crescent now, not after the slow
+        // release: pull the eased eye + relief deviation down by the same
+        // ratio zoom shrank this frame. Cross-driven modes snap to
+        // _crossEye anyway (already shrunk via freeOX/body below), so only
+        // the phantom eye needs the direct rescale here.
+        if (!crossDrive && zoomShrink < 1) {
+          _eyeSm.x *= zoomShrink;
+          _eyeSm.y *= zoomShrink;
+        }
+        if (relShrink < 1) {
+          _reliefSm = 1 + (_reliefSm - 1) * relShrink;
+        }
       }
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
@@ -2676,6 +2711,14 @@ function animate(): void {
         const rate = Math.min(1, (tgtMX > curMX ? 18 : 2.8) * delta);
         freeOX += (tgtX - freeOX) * rate;
         freeOY += (tgtY - freeOY) * rate;
+        // Wheel-out melts the drawn lead now: same stale-state shrink as the
+        // eye above — the stored zoomed-in lead would otherwise ride the
+        // slow 2.8/s catch-up and keep cross + crescent big after zooming
+        // out. Scaling (not snapping) keeps the melt proportional per tick.
+        if (zoomShrink < 1) {
+          freeOX *= zoomShrink;
+          freeOY *= zoomShrink;
+        }
         if (freeaimOn === 0) {
           freeOX = 0;
           freeOY = 0;
@@ -2722,6 +2765,14 @@ function animate(): void {
           (Math.abs(tgtRX) > Math.abs(bodyRX) ? 18 : 2.8) * delta,
         );
         bodyRX += (tgtRX - bodyRX) * rateR;
+        // Wheel-out melts the housing lag too (same stale-state shrink —
+        // the shoulder swing feeds the crescent via glassUv below, so it
+        // must melt together with the drawn lead above).
+        if (zoomShrink < 1) {
+          bodyLX *= zoomShrink;
+          bodyLY *= zoomShrink;
+          bodyRX *= zoomShrink;
+        }
         // No snap on mode exit: gate is 0 outside BODY so tgt is 0 and the
         // offsets ease back through this same filter instead of popping.
         // Apply the combined lead as a SHOULDER-PIVOT rotation rather than a
@@ -2790,6 +2841,11 @@ function animate(): void {
           -CROSS_EYE_MAX,
           CROSS_EYE_MAX,
         );
+        // Remember today's zoom for next frame's shrink ratios above. Done
+        // here (after every consumer) so all of them share the same
+        // last-frame reference.
+        prevFreeZoom = freeZoom;
+        prevZoomTighten = zoomTighten;
       }
 
       // Reticle roll = weapon-relative roll in FREE only. All locked modes
