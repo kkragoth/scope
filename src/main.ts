@@ -1438,8 +1438,8 @@ const lensMat = new THREE.ShaderMaterial({
       // forward along the barrel, so upright sampling here is correct. At hip
       // you see the ocular at an angle — perspective foreshortening handles
       // that, no texture flip needed. Do not "fix" by flipping vUv.
-      // FFP vs SFP: sniper reticle scales with magnification (first focal
-      // plane — subtensions stay true at any zoom), ACOG stays fixed size
+      // FFP vs SFP: ACOG reticle scales with magnification (first focal
+      // plane — subtensions stay true at any zoom), sniper stays fixed size
       // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
       // RETICLE ROLL: the etch is fixed to the gun, the eye is fixed to the
       // head. When the tube rolls relative to the eye the cross tilts "/" vs
@@ -1459,6 +1459,10 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
       vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
       bool isAcog = uOpticMode > 0.5 && uOpticMode < 1.5;
+      // ACOG illumination ("laser") rides WITH the etch so the whole sight
+      // zooms as one: dot + ring use p, sniper chevron keeps pi fixed.
+      // EOTECH (mode 2) is neither: its holo pattern uses eoq below.
+      vec2 piEff = isAcog ? p : pi;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
       // first off-axis — tiny features go before lines, like real glass.
@@ -1490,15 +1494,17 @@ const lensMat = new THREE.ShaderMaterial({
 
       // SNIPER illumination geometry: small chevron, apex = point of impact.
       // Measured in the fixed focal-plane scale (pi) so the lit core and its
-      // halo hold size against the zooming FFP etch. Actual masks are built by
-      // illumSniper/illumAcog below (three channels for reticle CA).
+      // halo hold size against zoom. ACOG instead uses piEff (= p) so its
+      // dot + ring scale WITH the etch (whole sight zooms as one).
+      // Actual masks are built by illumSniper/illumAcog below (three channels
+      // for reticle CA).
       vec2 apex = vec2(0.0, 0.004);
       vec2 footL = vec2(-0.02, -0.016);
       vec2 footR = vec2(0.02, -0.016);
       float dChev = min(sdSegment(pi, apex, footL), sdSegment(pi, apex, footR));
 
-      // ACOG / RED DOT geometry: big glowing dot + horseshoe ring (pi space)
-      float dDot = length(pi);
+      // ACOG / RED DOT geometry: big glowing dot + horseshoe ring (piEff space)
+      float dDot = length(piEff);
       float dRing = abs(dDot - 0.032);
 
       // EOTECH geometry: ring + dot + ticks, aspect-corrected so the ring
@@ -1512,7 +1518,7 @@ const lensMat = new THREE.ShaderMaterial({
       float haloDist = isEo
         ? min(dEoDot * 0.5, dEoRing + 0.012)
         : (isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev);
-      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(pi) * 22.0) * 0.08;
+      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(isEo ? eoq : piEff) * 22.0) * 0.08;
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
 
@@ -1524,13 +1530,13 @@ const lensMat = new THREE.ShaderMaterial({
       float retCa = dynamicAberration * reticleVis;        // reuse image CA amplitude
       float coreG = isEo
         ? illumEotech(eoq, focusW)
-        : (isAcog ? illumAcog(pi, focusW) : illumSniper(pi, apex, footL, footR, focusW));
+        : (isAcog ? illumAcog(piEff, focusW) : illumSniper(pi, apex, footL, footR, focusW));
       float coreR = isEo
         ? illumEotech(eoq * (1.0 - retCa), focusW)
-        : (isAcog ? illumAcog(pi * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW));
+        : (isAcog ? illumAcog(piEff * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW));
       float coreB = isEo
         ? illumEotech(eoq * (1.0 + retCa), focusW)
-        : (isAcog ? illumAcog(pi * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW));
+        : (isAcog ? illumAcog(piEff * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW));
       vec3 illumCol = vec3(coreR, coreG, coreB) * illumDim;
       sceneColor += uReticleColor * illumCol * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
@@ -2011,23 +2017,22 @@ const MIRROR_BRIGHT = 1.0;
 //                   stride signals) keeps the eye-relief crescent alive —
 //                   you get a planted reticle AND the scope still reads like
 //                   a real optic with an imperfect cheek weld.
-//   3 FREEAIM     — rigid picture, NO roll, but the etch slides U/D/L/R
-//                   inside the glass on mouse motion (gun leads the eye) and
-//                   eases back to centre after you stop — translational
-//                   free-aim, no torque rotation.
-//   4 BODY        — same idea but PHYSICAL: the scope housing itself trails
-//                   the eye (position lag with catch-up) while the rendered
-//                   picture stays on the aim line. The off-centre housing is
-//                   WHY the cross reads off-centre — etch stays glued to the
-//                   glass, the whole tube sits off-axis.
-//   5 BODY+FREE  — combo: housing shift (BODY) + etch slide (FREEAIM) both
-//                   live at once. The cross decenters by the SUM of the two,
-//                   so hard flicks travel widest here.
+//   3 FREEAIM     — the crosshair rides the barrel and leads the eye: on a
+//                   flick it swings off the picture centre (up to a corner)
+//                   and eases back to centre as the body catches up. The
+//                   picture stays rigid — the eye↔weapon↔crosshair rotation
+//                   read through the eyepiece.
+//   4 BODY        — the scope housing itself physically slides off the eye
+//                   line (position lag with catch-up) while the picture stays
+//                   rigid. The off-centre housing shifts the whole optic.
+//   5 BODY+FREE  — both live at once: crosshair lead + housing slide. The
+//                   cross decenters by the SUM, so hard flicks travel widest.
 // Manual Q/E lean and firing recoil are intentionally left alone in all modes.
 const SWAY_MODE_NAMES = ['FREE', 'LOCKED', 'LOCKED+EYE', 'FREEAIM', 'BODY', 'BODY+FREE'] as const;
-let swayMode = 5; // BODY+FREE default: housing shift + etch slide combined
-// FREEAIM translational state (lens UV units, ~vignette 0.485): chases a
+let swayMode = 5; // BODY+FREE default: crosshair lead + housing slide combined
+// FREEAIM aim-lead state (lens UV units, ~vignette 0.485): chases a
 // mouse-velocity target fast, bleeds back to centre slow = catch-up feel.
+// Drives the reticle (aim) offset AND the eye-box crescent below.
 let freeOX = 0;
 let freeOY = 0;
 // BODY physical-lag state (meters, tube radius 0.052): housing offset that
@@ -2036,6 +2041,13 @@ let freeOY = 0;
 let bodyLX = 0;
 let bodyLY = 0;
 let bodyRX = 0;
+// ZOOM-SHRINK memory: last frame's zoom factors. A wheel-out must pull the
+// slow-eased lead/crescent states (freeOX/body/_eyeSm/_reliefSm) down
+// proportionally at once — otherwise the stale zoomed-in lead hangs around
+// over the ~1s catch-up release and the crescent stays big after zooming
+// out. Updated at the end of each frame next to the crescent feed.
+let prevFreeZoom = 1;
+let prevZoomTighten = 1;
 const SWAY_UI = {
   el: document.getElementById('swaystate') as HTMLParagraphElement,
 };
@@ -2164,8 +2176,8 @@ function applyBattery(): void {
   eotechFilm.uniforms.uBattery.value = batteryOn.eotech;
   holoMat.uniforms.uBattery.value = batteryOn.eotech;
 }
-// FFP scaling (sniper reticle grows with zoom) — off by default, F toggles
-let ffpEnabled = false;
+// FFP scaling (ACOG reticle grows with zoom) — on by default, F toggles
+let ffpEnabled = true;
 const RETICLE_RED = new THREE.Color(1.0, 0.16, 0.05);
 const RETICLE_GREEN = new THREE.Color(0.25, 1.0, 0.35);
 const SNIPER_FOV = 3.0;
@@ -2174,6 +2186,14 @@ const ACOG_FOV = 9.0;
 // stays natural. The holo pane itself is see-through (no RT), so this only
 // drives look sensitivity + sway bookkeeping, never magnification.
 const EOTECH_FOV = 55.0;
+// EOTECH free-aim drive: the wheel is fixed at 1x (no zoom link possible —
+// fov 55 would collapse freeZoom to 0 and pin the holo dead), so the holo
+// rides a FIXED mid-zoom-equivalent drive instead. 0.6 lands between ACOG
+// base (~0.18) and sniper base (~0.74): flicks swing the window + dot
+// visibly off-centre with catch-up, without throwing the 1x sight around.
+// Tune 0.4..0.8 to taste; eyeMax below derives from it so cross + crescent
+// bookkeeping stay in proportion like the scopes.
+const EO_FREEZOOM = 0.6;
 
 export type OpticId = 'sniper' | 'acog' | 'eotech';
 function setOpticMode(mode: OpticId | boolean): void {
@@ -2190,11 +2210,10 @@ function setOpticMode(mode: OpticId | boolean): void {
   applyBattery();
   config.fov = isEo ? EOTECH_FOV : isAcog ? ACOG_FOV : SNIPER_FOV;
   scopeCamera.fov = config.fov;
-  // Objective station differs per housing (sniper bell vs ACOG cup)
-  // Render-camera station per housing: sniper bell, ACOG cup, EOTECH window.
-  // The holo RT runs at 1x (EOTECH_FOV) from the window plane, feeding the
-  // same lens shader the scopes use — that is what makes the reticle behave
-  // exactly like the scope crosshairs.
+  // Objective station differs per housing (sniper bell vs ACOG cup).
+  // The holo needs no scope feed: its window is true passthrough (naked-eye
+  // world + collimated screen-space beam), so the scope render is skipped
+  // entirely while the EOTECH is up (see the render block below).
   scopeCamera.position.z = isEo ? EOTECH_GLASS_Z : isAcog ? -0.14 : -(tubeLength / 2);
   scopeCamera.updateProjectionMatrix();
   // Fresh shoulder weld for the swapped optic: the eye geometry of the two
@@ -2208,6 +2227,8 @@ function setOpticMode(mode: OpticId | boolean): void {
   bodyLX = 0;
   bodyLY = 0;
   bodyRX = 0;
+  _crossEyeX = 0;
+  _crossEyeY = 0;
   sniperGroup.position.set(0, 0, 0);
   acogGroup.position.set(0, 0, 0);
   eotechGroup.position.set(0, 0, 0);
@@ -2409,6 +2430,45 @@ let _reliefSm = 1.0;
 // Slow deliberate corrections stay ≈ 0 (no eye-box exaggeration); quick flicks
 // go to ~1 and linger a beat while the eye re-seats.
 let _swaySpeed = 0.0;
+// Crosshair-driven eye (FREEAIM/BODY/BODY+FREE): the exit-pupil crescent is
+// keyed to how far the crosshair sits off-centre, not to raw mouse motion.
+// The crosshair state (reticle slide + housing lag) is eased later in the
+// frame, so its eye-space equivalent is stored here and consumed by the eye
+// smoothing at the top of the NEXT frame.
+let _crossEyeX = 0;
+let _crossEyeY = 0;
+const CROSS_EYE_MAX = 0.42;
+const CROSS_EYE_GAIN = 1.0;
+// SHOULDER PIVOT: the whole-rifle lead/body motion rotates about the point
+// where the butt meets the shoulder (below & behind the receiver, in the
+// weapon's local frame) instead of sliding the gun sideways as one rigid
+// block. The rear stays planted there while the muzzle sweeps the big arc —
+// that's the "fixed on the end, front moving" feel. SCOPE_ARM_Z is the
+// pivot-to-scope distance along the bore used to convert a lateral metre at
+// the scope into a rotation angle. SHOULDER_LEAD_GAIN is the fraction of the
+// reticle lead that is ALSO physically swung as barrel (rest stays on the
+// drawn crosshair so it keeps reading as free-aim).
+const SHOULDER_PIVOT = new THREE.Vector3(0, -0.28, 0.42);
+const SHOULDER_ARM_Z = 0.42;
+const SHOULDER_LEAD_GAIN = 0.35;
+// Extra whip on the shoulder rotation: the muzzle is far past the pivot, so
+// scaling the ANGLE (not the scope offset) lets it sweep a visibly bigger arc
+// than the scope actually travels. >1 = more rotation about the shoulder; the
+// scope/glass and the eye-box crescent shift by the same factor so everything
+// stays in proportion. Pivot closer to the rear (SHOULDER_ARM_Z smaller) also
+// demands a larger angle for the same scope offset = more rotation for the
+// same visible crosshair lead.
+const SHOULDER_SWING_GAIN = 1.9;
+// Cap how far the pivot rotation is allowed to shift the scope/glass centre,
+// so hard flicks never shove the sight circle off the view axis. The muzzle
+// keeps swinging because its lever arm past the pivot is ~3-4x the scope's.
+const SHOULDER_MAX_SCOPE = 0.034;
+// Single source of truth for the applied swing (set in the body block, read by
+// the crescent feed a few lines below) so rotation and shadow can never drift.
+let _scopeSwingX = 0;
+let _scopeSwingY = 0;
+const _leadEuler = new THREE.Euler(0, 0, 0, 'XYZ');
+const _leadPivot = new THREE.Vector3();
 let headLean = 0.0;
 let manualLean = 0.0;
 let breathHeld = false;
@@ -2646,12 +2706,13 @@ function animate(): void {
     // suppression below; stillZoom (and the damp above) shape how zoom scales
     // the free-float wobble. swayAct ≈ 0 when the rifle sits still, ~1 when it
     // is actually being swung/flicked.
-    // EOTECH is 1x: no zoom tightening, no eye-box amplification.
+    // EOTECH is 1x: no zoom tightening, no eye-box amplification — but it
+    // still uses main's 0.04 floor convention for the scoped optics.
     const zoomTw = eotechActive
       ? 1.0
       : THREE.MathUtils.clamp(
           Math.pow((acogActive ? ACOG_FOV : SNIPER_FOV) / config.fov, 2.0),
-          0.25,
+          0.04,
           6.0,
         );
     const swayAct = THREE.MathUtils.clamp(
@@ -2885,11 +2946,45 @@ function animate(): void {
       // reads ~1x gain, fully zoomed runs ~6x. Quadratic falloff so the
       // forgiving end drops off fast while the top end bites hard — this is
       // the "harder eye relief when zoomed" feel the shader eats up.
-      // EOTECH is a 1x holo sight: no eye box at all (unmagnified window).
+      // EOTECH is a 1x holo sight: no magnification-driven eye-box
+      // tightening (fixed 1.0), but it still rides the freeZoom/crescent
+      // pipeline below so the crosshair lead + crescent read like the scopes.
       const baseFov = isAcog ? ACOG_FOV : SNIPER_FOV;
+      // ZOOM LINK (same floor as zoomTw): zoomed-out -> error collapses toward
+      // zero (cross stays, crescent fades); zoomed-in -> error amplifies.
       const zoomTighten = isEo
         ? 1.0
-        : THREE.MathUtils.clamp(Math.pow(baseFov / config.fov, 2.0), 0.25, 6.0);
+        : THREE.MathUtils.clamp(Math.pow(baseFov / config.fov, 2.0), 0.04, 6.0);
+      // FREEAIM/BODY zoom link: 0 at lowest mag, full at highest. Tied to
+      // wheel position (fov 15 -> 0, fov 1 -> 1, quadratic so the low end
+      // stays near-zero longer), NOT to base-mag — fully zoomed-out never
+      // moves, no matter the optic. Kept separate from the optical
+      // zoomTighten above (which drives the crescent/relief).
+      // EOTECH exception: fixed 1x, no wheel — ride EO_FREEZOOM so the holo
+      // gets the same flick-lead + catch-up body language as the scopes.
+      const zoom01 = THREE.MathUtils.clamp((15 - config.fov) / 14, 0, 1);
+      const freeZoom = eotechActive ? EO_FREEZOOM : zoom01 * zoom01;
+      // CRESCENT zoom link: 0 at lowest mag (fov 15 -> eyeMax 0, no crescent
+      // even on hard mouse flicks), growing proportionally to full bite at
+      // highest mag. Same wheel factor as freeaim/body so cross + crescent
+      // scale together.
+      const eyeMax = 0.375 * freeZoom;
+      // ZOOM-OUT SHRINK RATIOS: <1 only while wheeling OUT (clamped to 1
+      // otherwise, so zooming IN never touches stored states — the fast
+      // attack builds the bigger lead up naturally). The eased states below
+      // are glass-space expressions of the lead: when zoom collapses, their
+      // old zoomed-in magnitude is stale, so scale them by the same ratio.
+      // Sway-stop decay still rides the slow releases (this only bites when
+      // the wheel actually moved), and mode exits still ease out with no
+      // snap (this keys on zoom, not on the mode/ADS gate).
+      const zoomShrink =
+        prevFreeZoom > 1e-4
+          ? THREE.MathUtils.clamp(freeZoom / prevFreeZoom, 0, 1)
+          : 1;
+      const relShrink =
+        prevZoomTighten > 1e-4
+          ? THREE.MathUtils.clamp(zoomTighten / prevZoomTighten, 0, 1)
+          : 1;
       const relief = THREE.MathUtils.clamp(
         1 + (reliefDist / optRelief - 1) * zoomTighten,
         0.35,
@@ -2914,9 +3009,11 @@ function animate(): void {
       // panning to re-aim stays 1:1 at any zoom while the optic still reads as
       // an imperfect cheek weld. Ramps in with currentAdsWeight, then rides
       // the zoom-gain / operator-reseat pipeline below exactly like real sway.
-      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2), FREEAIM
-      // (mode 3), BODY (mode 4) and BODY+FREE (mode 5) run full strength;
-      // FREE (mode 0) runs a gentler copy.
+      // LOCKED (mode 1) opts out entirely; LOCKED+EYE (mode 2) and FREE
+      // (mode 0, gentler) run this phantom copy. FREEAIM / BODY / BODY+FREE
+      // (modes 3/4/5) SKIP the phantom — their crescent is driven directly by
+      // the crosshair's off-centre position further down, so the shadow tracks
+      // the visible reticle decentration 1:1 instead of raw mouse motion.
       // HOLD BREATH (Shift): the cheek weld becomes deliberate — the synthetic
       // error ramps to zero with holdBlend so the eye re-seats dead-centre and
       // the crescent closes at ANY zoom while you're steadying.
@@ -2940,14 +3037,13 @@ function animate(): void {
         (Math.tanh(rawX * 0.9) * distGain + phX) * zoomTighten;
       const softY =
         (Math.tanh(rawY * 0.9) * distGain + phY) * zoomTighten;
-      let eyeU = THREE.MathUtils.clamp(softX * 0.8, -0.3, 0.3);
-      let eyeV = THREE.MathUtils.clamp(softY * 0.8, -0.3, 0.3);
-      // Holographic sight: the window has no exit pupil — the eye can sit
-      // anywhere and the reticle stays put. Kill the crescent at the source.
-      if (isEo) {
-        eyeU = 0;
-        eyeV = 0;
-      }
+      // eyeMax: zoomed-out caps the eye error tiny (less crescent even on
+      // hard flicks); zoomed-in lets it run past base for a bigger bite.
+      // EOTECH rides the same clamp (its eyeMax is fixed at ~mid-zoom below,
+      // since 1x has no wheel) so flicks still bite a crescent for feel.
+      // Relief stays perfect for holo (reliefEff below); only lateral bite.
+      const eyeU = THREE.MathUtils.clamp(softX * 0.8, -eyeMax, eyeMax);
+      const eyeV = THREE.MathUtils.clamp(softY * 0.8, -eyeMax, eyeMax);
       // Zoom blackening response (Z): eyeU/eyeV/relief are ALREADY zoom-
       // amplified, so the only knob needed is how much of that error "counts".
       // When the rifle is sitting still we suppress it (harder as you zoom),
@@ -2977,11 +3073,19 @@ function animate(): void {
       //            fast, re-shouldering starts a fresh weld, and holding breath
       //            (SHIFT) lets you deliberately re-seat back into the box.
       {
+        // X modes 3/4/5 (FREEAIM / BODY / BODY+FREE) drive the eye-box from
+        // the CROSSHAIR's off-centre position instead of a raw mouse-velocity
+        // phantom: the crescent appears because the cross sits off the aim
+        // line, and it closes as the body catches up and the cross eases back
+        // to centre. The crosshair's own easing (18 attack / 2.8 catch-up)
+        // carries the motion, so the eye just mirrors it exactly — shadow and
+        // crosshair move as one. Modes 0/2 keep the synthetic phantom eye.
+        const crossDrive = swayMode === 3 || swayMode === 4 || swayMode === 5;
         const aimRising = isAiming && !prevAiming;
         prevAiming = isAiming;
-        let tgtX = eyeUEff;
-        let tgtY = eyeVEff;
-        if (eyeBoxMode === 2) {
+        let tgtX = crossDrive ? _crossEyeX : eyeUEff;
+        let tgtY = crossDrive ? _crossEyeY : eyeVEff;
+        if (!crossDrive && eyeBoxMode === 2) {
           // SOFT's standing wander is what stops the eye from re-seating fully;
           // holding breath (Shift) lets the weld settle anyway.
           const wob =
@@ -3003,103 +3107,210 @@ function animate(): void {
           // steadying clears promptly instead of decaying over a beat
           releaseRate = 12.0;
         }
-        const eyeRate = Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
+        // crossDrive: snap to the crosshair-derived offset (already eased by
+        // the freeaim/body filters) so the crescent reads 1:1 with the cross.
+        const eyeRate = crossDrive
+          ? 1.0
+          : Math.min(1, (tgtMag > curMag ? 16 : releaseRate) * delta);
         const relDev = Math.abs(reliefEff - 1);
         const relCur = Math.abs(_reliefSm - 1);
         const relRate = Math.min(1, (relDev > relCur ? 12 : 5) * delta);
         _eyeSm.x += (tgtX - _eyeSm.x) * eyeRate;
         _eyeSm.y += (tgtY - _eyeSm.y) * eyeRate;
         _reliefSm += (reliefEff - _reliefSm) * relRate;
+        // Wheel-out melts the stored crescent now, not after the slow
+        // release: pull the eased eye + relief deviation down by the same
+        // ratio zoom shrank this frame. Cross-driven modes snap to
+        // _crossEye anyway (already shrunk via freeOX/body below), so only
+        // the phantom eye needs the direct rescale here.
+        if (!crossDrive && zoomShrink < 1) {
+          _eyeSm.x *= zoomShrink;
+          _eyeSm.y *= zoomShrink;
+        }
+        if (relShrink < 1) {
+          _reliefSm = 1 + (_reliefSm - 1) * relShrink;
+        }
       }
       (lensMat.uniforms.uEyeOffset.value as THREE.Vector2).copy(_eyeSm);
       lensMat.uniforms.uEyeRelief.value = _reliefSm;
       lensMat.uniforms.uZoomK.value = zoomTighten;
 
-      // FREEAIM translational etch: mouse flick displaces the cross U/D/L/R
-      // (gun leads the eye), release eases it back to centre = catch-up.
-      // No roll, no picture swing — imageShift stays 0, only reticleCenter
-      // moves. Gated by ADS + breath hold so a steady hold re-centres.
-      // Wide travel: the cross can roam ~40% of the glass radius before the
-      // clamp catches it — same order as the phantom crescent bite.
+      // FREEAIM aim-lead offset (lens UV units): the crosshair IS the weapon's
+      // point of aim riding the barrel. On a flick the barrel rotates ahead of
+      // the eye (eye–weapon–crosshair rotation), so through the eyepiece the
+      // crosshair reads off the picture centre — toward a corner on hard
+      // flicks — while the picture stays rigid. Release eases it back to
+      // centre = the body catching up. Gated by ADS + breath hold so a steady
+      // hold re-centres.
+      // ZOOM-LINKED (freeZoom): 0 at lowest mag (fov 15, no movement at all),
+      // full only at highest mag (fov 1). Travel RANGE (freeRange) also grows
+      // with zoom so the cross rides further off-centre the more magnified the
+      // view — same angular free-aim, more of the glass.
       {
-        const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend);
+        const gate = freeaimOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
+        // Travel range grows with zoom: a fixed angular free-aim spans more of
+        // the magnified glass, so at high power the cross rides much further
+        // off-centre (near-zero range when fully zoomed out). The breathing
+        // wander keeps a small misalignment (and whisper of crescent) alive so
+        // a planted rifle still reads as a living cheek weld.
+        const freeRange = THREE.MathUtils.lerp(0.035, 0.19, freeZoom);
         // Flick right -> cross kicks right, flick up -> cross kicks up:
-        // the etch moves AHEAD of the look direction, not behind it.
+        // the barrel leads AHEAD of the look direction, not behind it.
         const tgtX =
-          THREE.MathUtils.clamp(mouseVelocityX * 2.2, -0.2, 0.2) * gate +
-          Math.sin(time * 0.9 + seedB) * 0.006 * gate;
+          THREE.MathUtils.clamp(mouseVelocityX * 2.2, -freeRange, freeRange) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.01 * gate;
         const tgtY =
-          THREE.MathUtils.clamp(-mouseVelocityY * 1.8, -0.2, 0.2) * gate +
-          Math.cos(time * 0.7 + seedC) * 0.006 * gate;
+          THREE.MathUtils.clamp(-mouseVelocityY * 1.9, -freeRange, freeRange) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.01 * gate;
         const curMX = Math.hypot(freeOX, freeOY);
         const tgtMX = Math.hypot(tgtX, tgtY);
         // Fast attack (follows the flick), slow release (catch-up after stop).
         const rate = Math.min(1, (tgtMX > curMX ? 18 : 2.8) * delta);
         freeOX += (tgtX - freeOX) * rate;
         freeOY += (tgtY - freeOY) * rate;
+        // Wheel-out melts the drawn lead now: same stale-state shrink as the
+        // eye above — the stored zoomed-in lead would otherwise ride the
+        // slow 2.8/s catch-up and keep cross + crescent big after zooming
+        // out. Scaling (not snapping) keeps the melt proportional per tick.
+        if (zoomShrink < 1) {
+          freeOX *= zoomShrink;
+          freeOY *= zoomShrink;
+        }
         if (freeaimOn === 0) {
           freeOX = 0;
           freeOY = 0;
         }
+        // The crosshair line rides the barrel: push the etched reticle around
+        // inside the (rigid) picture so it visibly leaves the centre while the
+        // weapon leads.
         (lensMat.uniforms.uReticleOffset.value as THREE.Vector2).set(
           freeOX,
           freeOY,
         );
       }
 
-      // BODY physical housing lag: the tube itself leads the eye and
-      // re-seats — scopeCamera stays rigid on the aim line so the WORLD
-      // picture never detaches, but the housing + lens + etch ride off-axis
-      // ahead of the look as one unit and ease back. That off-axis housing IS
-      // the decentering: the cross reads ahead because the whole scope sits
-      // ahead of the look direction.
-      // Same asymmetric catch-up as FREEAIM, in meters (wide travel can
-      // push past the rim on hard flicks).
+      // BODY physical housing lag: the scope housing itself slides off the eye
+      // line and re-seats — scopeCamera stays rigid on the aim line so the
+      // WORLD picture never detaches, but the housing + lens ride off-axis
+      // ahead of the look as one unit and ease back. This is the whole-optic
+      // slide in front of the eye (weapon slide), added on top of the FREEAIM
+      // crosshair lead so hard flicks travel widest in BODY+FREE.
+      // ZOOM-LINKED like FREEAIM (freeZoom): 0 at lowest mag, tamed travel so
+      // the combo stays inside the glass even fully zoomed.
       {
-        const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend);
+        const gate = bodyOn * currentAdsWeight * (1.0 - holdBlend) * freeZoom;
+        const bodyRange = THREE.MathUtils.lerp(0.002, 0.026, freeZoom);
         // Flick right -> housing kicks right, flick up -> housing kicks up.
-        // Tight travel (±0.03, inside the 0.052 tube radius): the eye stays
-        // in glass, the box breathes instead of blacking out.
-        // Holographic exception: the beam is collimated (nailed to the bore),
-        // so a translating housing drags the window off a truthful dot and
-        // reads as lag — a real shouldered gun can't shift 30 mm without
-        // rotating aim. Keep holo travel tight (±9 mm); rotations still read.
-        const travelK = eotechActive ? 0.3 : 1.0;
+        // Flick right -> housing kicks right, flick up -> housing kicks up.
+        // Zoom-linked bodyRange keeps the combo inside the glass at any mag.
+        // EOTECH rides the same range at full gain: the holo window must
+        // slide like the scope housings for the free-aim feel (parity).
         const tgtX =
-          (THREE.MathUtils.clamp(mouseVelocityX * 0.3, -0.03, 0.03) +
-            Math.sin(time * 0.9 + seedB) * 0.0015) *
-          gate *
-          travelK;
+          THREE.MathUtils.clamp(mouseVelocityX * 0.3, -bodyRange, bodyRange) * gate +
+          Math.sin(time * 0.9 + seedB) * 0.0015 * gate;
         const tgtY =
-          (THREE.MathUtils.clamp(-mouseVelocityY * 0.24, -0.03, 0.03) +
-            Math.cos(time * 0.7 + seedC) * 0.0015) *
-          gate *
-          travelK;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.26, -bodyRange, bodyRange) * gate +
+          Math.cos(time * 0.7 + seedC) * 0.0015 * gate;
         const curM = Math.hypot(bodyLX, bodyLY);
         const tgtM = Math.hypot(tgtX, tgtY);
         const rate = Math.min(1, (tgtM > curM ? 18 : 2.8) * delta);
         bodyLX += (tgtX - bodyLX) * rate;
         bodyLY += (tgtY - bodyLY) * rate;
         // Pitch whisper (up/down only): tilts ahead with the look —
-        // flick up tips the housing up, then levels out on stop.
-        // Generous range (±0.09 rad, ~5°) so the nod reads clearly. No yaw,
-        // no roll — those read as broken scope. Holo nods less, same reason
-        // as above: the window must not outrun its collimated dot.
+        // flick up tips the housing up, then levels out on stop. No yaw,
+        // no roll — those read as broken scope.
         const tgtRX =
-          THREE.MathUtils.clamp(-mouseVelocityY * 0.9, -0.09, 0.09) * gate * travelK;
+          THREE.MathUtils.clamp(-mouseVelocityY * 0.5, -0.06, 0.06) * gate;
         const rateR = Math.min(
           1,
           (Math.abs(tgtRX) > Math.abs(bodyRX) ? 18 : 2.8) * delta,
         );
         bodyRX += (tgtRX - bodyRX) * rateR;
+        // Wheel-out melts the housing lag too (same stale-state shrink —
+        // the shoulder swing feeds the crescent via glassUv below, so it
+        // must melt together with the drawn lead above).
+        if (zoomShrink < 1) {
+          bodyLX *= zoomShrink;
+          bodyLY *= zoomShrink;
+          bodyRX *= zoomShrink;
+        }
         // No snap on mode exit: gate is 0 outside BODY so tgt is 0 and the
-        // housing eases back through this same filter instead of popping.
-        sniperGroup.position.set(bodyLX, bodyLY, 0);
-        acogGroup.position.set(bodyLX, bodyLY, 0);
-        eotechGroup.position.set(bodyLX, bodyLY, 0);
-        sniperGroup.rotation.set(bodyRX, 0, 0);
-        acogGroup.rotation.set(bodyRX, 0, 0);
-        eotechGroup.rotation.set(bodyRX, 0, 0);
+        // offsets ease back through this same filter instead of popping.
+        // Apply the combined lead as a SHOULDER-PIVOT rotation rather than a
+        // parallel slide: rotate the whole rifle about the shoulder point so
+        // the rear/butt stays planted and the muzzle sweeps the arc, while the
+        // scope (mounted ~SCOPE_ARM_Z ahead of the pivot) lands at the
+        // requested lateral offset. A small share of the reticle lead is swung
+        // as barrel too, so the front visibly points the way the crosshair
+        // rides — the rest stays as the drawn crosshair for the free-aim read.
+        const tubeR = acogActive ? 0.0355 : tubeRadius;
+        const scopeSx =
+          (bodyLX + freeOX * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        const scopeSy =
+          (bodyLY + freeOY * 2 * tubeR * SHOULDER_LEAD_GAIN) * SHOULDER_SWING_GAIN;
+        // Clamp so the glass never leaves the view axis; store the applied
+        // swing for the crescent feed below (single source of truth).
+        _scopeSwingX = THREE.MathUtils.clamp(
+          scopeSx,
+          -SHOULDER_MAX_SCOPE,
+          SHOULDER_MAX_SCOPE,
+        );
+        _scopeSwingY = THREE.MathUtils.clamp(
+          scopeSy,
+          -SHOULDER_MAX_SCOPE,
+          SHOULDER_MAX_SCOPE,
+        );
+        const leadPitch = _scopeSwingY / SHOULDER_ARM_Z;
+        const leadYaw = -_scopeSwingX / SHOULDER_ARM_Z;
+        _leadEuler.set(leadPitch + bodyRX, leadYaw, 0);
+        // position = pivot - R*pivot  =>  the shoulder point never moves, all
+        // parts rotate around it (muzzle swings most, rear barely at all).
+        _leadPivot.copy(SHOULDER_PIVOT).applyEuler(_leadEuler);
+        sniperGroup.position.copy(SHOULDER_PIVOT).sub(_leadPivot);
+        sniperGroup.rotation.copy(_leadEuler);
+        acogGroup.position.copy(sniperGroup.position);
+        acogGroup.rotation.copy(_leadEuler);
+        // EOTECH rides the same shoulder pivot so the holo window slides
+        // with the same body language as the scope housings (free-aim feel).
+        eotechGroup.position.copy(sniperGroup.position);
+        eotechGroup.rotation.copy(_leadEuler);
+      }
+
+      // ---- CRESCENT FOLLOWS THE CROSSHAIR (FREEAIM/BODY/BODY+FREE) ----
+      // The eye offset that drives the exit-pupil shadow is derived from how
+      // far the cross actually sits off the eye line right now: the drawn
+      // crosshair lead (freeaim, in lens-UV) PLUS the physical glass-centre
+      // shift produced by the shoulder-pivot rotation of the whole rifle
+      // (body lag + swung lead share). uv = 0.5 * shift / tubeR.
+      // The eye offset points the SAME way the cross decentred: under the
+      // default OPPOSITE crescent side the shader then bites the shadow on the
+      // FAR side of the cross — a trailing crescent that keeps the aim/target
+      // area clean. N still lets you ride the shadow up under the crosshair
+      // itself instead.
+      // Stored here for the NEXT frame, where the eye smoothing consumes it.
+      {
+        const tubeR = acogActive ? 0.0355 : tubeRadius;
+        // Glass-centre shift in lens-UV from the SAME clamped swing applied to
+        // the rotation above (uv = 0.5 * shift / tubeR). Total crosshair
+        // decentre = drawn lead (freeOX) + that glass shift; the eye offset
+        // mirrors it exactly so shadow and crosshair move together.
+        const glassUvX = (_scopeSwingX / tubeR) * 0.5;
+        const glassUvY = (_scopeSwingY / tubeR) * 0.5;
+        _crossEyeX = THREE.MathUtils.clamp(
+          (freeOX + glassUvX) * CROSS_EYE_GAIN,
+          -CROSS_EYE_MAX,
+          CROSS_EYE_MAX,
+        );
+        _crossEyeY = THREE.MathUtils.clamp(
+          (freeOY + glassUvY) * CROSS_EYE_GAIN,
+          -CROSS_EYE_MAX,
+          CROSS_EYE_MAX,
+        );
+        // Remember today's zoom for next frame's shrink ratios above. Done
+        // here (after every consumer) so all of them share the same
+        // last-frame reference.
+        prevFreeZoom = freeZoom;
+        prevZoomTighten = zoomTighten;
       }
 
       // Reticle roll = weapon-relative roll in FREE only. All locked modes
@@ -3109,13 +3320,15 @@ function animate(): void {
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
-    // FFP sniper reticle follows magnification, ACOG/EOTECH stay fixed (SFP).
-    // FFP is opt-in via F (off by default); ACOG ignores it entirely.
+    // FFP ACOG reticle follows magnification, sniper stays fixed (SFP).
+    // FFP is on by default, F toggles; sniper ignores it entirely. EOTECH
+    // (mode 2) is fixed 1x like the sniper — narrow the ACOG test so the
+    // holo never inherits the ACOG zoom scale.
     const opticModeNow = lensMat.uniforms.uOpticMode.value as number;
-    const isSniperNow = opticModeNow < 0.5;
+    const isAcogNow = opticModeNow > 0.5 && opticModeNow < 1.5;
     lensMat.uniforms.uReticleScale.value =
-      isSniperNow && ffpEnabled
-        ? THREE.MathUtils.clamp(SNIPER_FOV / config.fov, 0.35, 2.2)
+      isAcogNow && ffpEnabled
+        ? THREE.MathUtils.clamp(ACOG_FOV / config.fov, 0.35, 2.2)
         : 1.0;
 
     // ---- SUN / GLINT: project global directional light into scope view ----
@@ -3258,8 +3471,15 @@ function animate(): void {
     if (eotechActive) {
       camera.updateMatrixWorld();
       _hCamInv.copy(camera.matrixWorld).invert();
-      // sight axis in world — rides weapon sway + recoil, so the dot dances
-      weaponGroup.getWorldQuaternion(_hQ);
+      // Sight axis rides the BARREL (eotechGroup), not the head frame: weapon
+      // sway + recoil live on the parent weaponGroup, but the free-aim /
+      // body lead rotation lives on the child housing (shoulder-pivot block
+      // above). Reading the child's world quaternion folds the lead in, so
+      // the collimated dot truly re-points over the passthrough world on
+      // flicks — window + dot swing off-centre together and ease back —
+      // instead of sitting nailed to the screen while the housing slides.
+      // getWorldQuaternion refreshes ancestors, so no one-frame lag.
+      eotechGroup.getWorldQuaternion(_hQ);
       _hDir.set(0, 0, -1).applyQuaternion(_hQ);
       _hV.copy(_camWorld).addScaledVector(_hDir, 300).applyMatrix4(_hCamInv);
       if (_hV.z < -0.01) {
