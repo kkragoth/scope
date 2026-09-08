@@ -1108,8 +1108,8 @@ const lensMat = new THREE.ShaderMaterial({
       // forward along the barrel, so upright sampling here is correct. At hip
       // you see the ocular at an angle — perspective foreshortening handles
       // that, no texture flip needed. Do not "fix" by flipping vUv.
-      // FFP vs SFP: sniper reticle scales with magnification (first focal
-      // plane — subtensions stay true at any zoom), ACOG stays fixed size
+      // FFP vs SFP: ACOG reticle scales with magnification (first focal
+      // plane — subtensions stay true at any zoom), sniper stays fixed size
       // (second focal plane). uReticleScale = baseFov / currentFov, clamped.
       // RETICLE ROLL: the etch is fixed to the gun, the eye is fixed to the
       // head. When the tube rolls relative to the eye the cross tilts "/" vs
@@ -1129,6 +1129,9 @@ const lensMat = new THREE.ShaderMaterial({
       vec2 p  = rcGun / (uReticleScale * imageScale);  // etch (FFP subtends with zoom)
       vec2 pi = rcGun / imageScale;                    // illuminated reticle (fixed focal plane)
       bool isAcog = uOpticMode > 0.5;
+      // ACOG illumination ("laser") rides WITH the etch so the whole sight
+      // zooms as one: dot + ring use p, sniper chevron keeps pi fixed.
+      vec2 piEff = isAcog ? p : pi;
 
       // SNIPER etch: AA hairlines (no shimmer); fine mil-dots defocus out
       // first off-axis — tiny features go before lines, like real glass.
@@ -1159,21 +1162,23 @@ const lensMat = new THREE.ShaderMaterial({
 
       // SNIPER illumination geometry: small chevron, apex = point of impact.
       // Measured in the fixed focal-plane scale (pi) so the lit core and its
-      // halo hold size against the zooming FFP etch. Actual masks are built by
-      // illumSniper/illumAcog below (three channels for reticle CA).
+      // halo hold size against zoom. ACOG instead uses piEff (= p) so its
+      // dot + ring scale WITH the etch (whole sight zooms as one).
+      // Actual masks are built by illumSniper/illumAcog below (three channels
+      // for reticle CA).
       vec2 apex = vec2(0.0, 0.004);
       vec2 footL = vec2(-0.02, -0.016);
       vec2 footR = vec2(0.02, -0.016);
       float dChev = min(sdSegment(pi, apex, footL), sdSegment(pi, apex, footR));
 
-      // ACOG / RED DOT geometry: big glowing dot + horseshoe ring (pi space)
-      float dDot = length(pi);
+      // ACOG / RED DOT geometry: big glowing dot + horseshoe ring (piEff space)
+      float dDot = length(piEff);
       float dRing = abs(dDot - 0.032);
 
       // bloom: tight halo in dark environments (battery bleed)
       // ACOG dot blooms wider than the sniper chevron on purpose.
       float haloDist = isAcog ? min(dDot * 0.55, dRing + 0.012) : dChev;
-      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(pi) * 22.0) * 0.08;
+      float halo = exp(-haloDist * 90.0) * 0.4 + exp(-length(piEff) * 22.0) * 0.08;
       float darkFactor = 1.0 - smoothstep(0.04, 0.42, dot(sceneColor, vec3(0.299, 0.587, 0.114)));
       float glowStrength = (0.55 + darkFactor * 2.2) * uBattery;
 
@@ -1183,9 +1188,9 @@ const lensMat = new THREE.ShaderMaterial({
       // the lit mask is sampled per channel at three radial scales so the
       // chevron/dot fringes like the world image bending behind it.
       float retCa = dynamicAberration * reticleVis;        // reuse image CA amplitude
-      float coreG = isAcog ? illumAcog(pi, focusW) : illumSniper(pi, apex, footL, footR, focusW);
-      float coreR = isAcog ? illumAcog(pi * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW);
-      float coreB = isAcog ? illumAcog(pi * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW);
+      float coreG = isAcog ? illumAcog(piEff, focusW) : illumSniper(pi, apex, footL, footR, focusW);
+      float coreR = isAcog ? illumAcog(piEff * (1.0 - retCa), focusW) : illumSniper(pi * (1.0 - retCa), apex, footL, footR, focusW);
+      float coreB = isAcog ? illumAcog(piEff * (1.0 + retCa), focusW) : illumSniper(pi * (1.0 + retCa), apex, footL, footR, focusW);
       vec3 illumCol = vec3(coreR, coreG, coreB) * illumDim;
       sceneColor += uReticleColor * illumCol * glowStrength * reticleVis;
       sceneColor += uReticleColor * halo * glowStrength * 0.5 * reticleVis;
@@ -1767,8 +1772,8 @@ const batteryOn: { sniper: number; acog: number } = { sniper: 0, acog: 1 };
 function applyBattery(): void {
   lensMat.uniforms.uBattery.value = batteryOn[acogActive ? 'acog' : 'sniper'];
 }
-// FFP scaling (sniper reticle grows with zoom) — off by default, F toggles
-let ffpEnabled = false;
+// FFP scaling (ACOG reticle grows with zoom) — on by default, F toggles
+let ffpEnabled = true;
 const RETICLE_RED = new THREE.Color(1.0, 0.16, 0.05);
 const RETICLE_GREEN = new THREE.Color(0.25, 1.0, 0.35);
 const SNIPER_FOV = 3.0;
@@ -2794,12 +2799,12 @@ function animate(): void {
     }
     lensMat.uniforms.uTime.value = time;
     skyMat.uniforms.uTime.value = time;
-    // FFP sniper reticle follows magnification, ACOG stays fixed (SFP).
-    // FFP is opt-in via F (off by default); ACOG ignores it entirely.
+    // FFP ACOG reticle follows magnification, sniper stays fixed (SFP).
+    // FFP is on by default, F toggles; sniper ignores it entirely.
     const isAcogNow = (lensMat.uniforms.uOpticMode.value as number) > 0.5;
     lensMat.uniforms.uReticleScale.value =
-      !isAcogNow && ffpEnabled
-        ? THREE.MathUtils.clamp(SNIPER_FOV / config.fov, 0.35, 2.2)
+      isAcogNow && ffpEnabled
+        ? THREE.MathUtils.clamp(ACOG_FOV / config.fov, 0.35, 2.2)
         : 1.0;
 
     // ---- SUN / GLINT: project global directional light into scope view ----
