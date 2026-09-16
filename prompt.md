@@ -2,11 +2,12 @@
 
 You are working in the repo at C:\Users\kkragoth\dev\scope — a three.js first-person
 rifle-scope demo. TypeScript + Vite. Commands:
-  - run:   npm run dev        (pointer-lock click; right mouse button = ADS/scope)
-  - check: npx tsc --noEmit
-  - build: npm run build
-Do NOT commit anything. Keep the existing code style (heavy explanatory comments).
-Only report what you find/do; no screenshots needed.
+
+- run: npm run dev (pointer-lock click; right mouse button = ADS/scope)
+- check: npx tsc --noEmit
+- build: npm run build
+  Do NOT commit anything. Keep the existing code style (heavy explanatory comments).
+  Only report what you find/do; no screenshots needed.
 
 ## The problem (read this carefully)
 
@@ -84,7 +85,7 @@ this order:
 - Prefer small, tunable constants near the other shoulder/swing constants, and
   explain what each knob does. Do not over-tune; pick sensible defaults that read
   well at the default mode 5 and note what to tweak.
-- Keep comments in the same voice/style (they explain *why*).
+- Keep comments in the same voice/style (they explain _why_).
 
 ## Acceptance / done criteria
 

@@ -6,13 +6,20 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint",
+    "format": "prettier",
+    "check": "prettier --write . && eslint --fix"
   },
   "dependencies": {
     "three": "^0.180.0"
   },
   "devDependencies": {
+    "@tanstack/eslint-config": "^0.4.0",
+    "@types/node": "^25.5.0",
     "@types/three": "^0.180.0",
+    "eslint": "10.1.0",
+    "prettier": "^3.8.1",
     "typescript": "~5.9.2",
     "vite": "^7.1.7"
   }

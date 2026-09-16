@@ -357,5 +357,5 @@ enabled — ACOG already has `uReticleScale == 1.0`.)
   blend factor in `min(x, 1.0)`.
 - Do not rename uniforms or change the JS `uEyeRelief`/`uEyeOffset`/`uZoomK` plumbing
   — these changes are shader-local (plus one uniform default in #7).
-- Keep the existing large comment blocks intact where they explain *why* (e.g. the
+- Keep the existing large comment blocks intact where they explain _why_ (e.g. the
   hip/ADS back-loading, FFP/SFP, roll). Update only the code they describe.
