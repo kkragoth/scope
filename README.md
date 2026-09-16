@@ -1,5 +1,8 @@
 # Scope — gamified rifle-scope optics demo
 
+![Sniper scope ADS](.github/scope1.png)
+![ACOG sight](.github/scope2.png)
+
 Live demo: **https://scope-ten-phi.vercel.app/**
 
 Three.js / Vite / TypeScript first-person rifle-scope demo by Piotr Szulc
